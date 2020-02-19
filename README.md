@@ -1,3 +1,5 @@
+[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/truatpasteurdotfr/cellpose/master)
+
 # Cellpose <img src="cellpose/logo/logo.png" width="250" title="cellpose" alt="cellpose" align="right" vspace = "50">
 
 A generalist algorithm for cell and nucleus segmentation. 
