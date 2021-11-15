@@ -14,6 +14,15 @@
 [![repo size](https://img.shields.io/github/repo-size/MouseLand/cellpose)](https://github.com/MouseLand/cellpose/)
 [![GitHub stars](https://img.shields.io/github/stars/MouseLand/cellpose?style=social)](https://github.com/MouseLand/cellpose/)
 [![GitHub forks](https://img.shields.io/github/forks/MouseLand/cellpose?style=social)](https://github.com/MouseLand/cellpose/)
+[![Docker and Singularity build](https://github.com/truatpasteurdotfr/cellpose/actions/workflows/docker-singularity-publish.yml/badge.svg)](https://github.com/truatpasteurdotfr/cellpose/actions/workflows/docker-singularity-publish.yml)
+Docker:
+```
+docker pull ghcr.io/truatpasteurdotfr/cellpose:master
+```
+Singularity:
+```
+singularity shell oras://ghcr.io/truatpasteurdotfr/cellpose:latest
+```
 
 A generalist algorithm for cell and nucleus segmentation. 
 
