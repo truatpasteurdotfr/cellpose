@@ -14,7 +14,8 @@ RUN apt-get install -y \
 
 RUN conda update --yes conda && \
     conda update -n base -c defaults conda -y && \
-    conda update --all -y && \
+    conda update --all -y 
+RUN eval "$(/opt/conda/bin/conda shell.bash hook)" && \
     conda create --name cellpose python=3.8 && \
     conda activate cellpose && \
     conda install pytorch cudatoolkit=11.3 -c pytorch && \
