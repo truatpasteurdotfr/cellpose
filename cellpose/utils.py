@@ -1,35 +1,384 @@
+import os, warnings, time, tempfile, datetime, pathlib, shutil, subprocess
+from tqdm import tqdm
+from urllib.request import urlopen
+from urllib.parse import urlparse
 import cv2
-from scipy.ndimage.filters import maximum_filter1d
-from skimage import draw
+from scipy.ndimage import find_objects, gaussian_filter, generate_binary_structure, label, maximum_filter1d, binary_fill_holes
+from scipy.spatial import ConvexHull
+from scipy.stats import gmean
 import numpy as np
-import mxnet as mx
-import mxnet.ndarray as nd
-from mxnet import gpu, cpu
-import time
-from numba import njit, float32, int32
-import os, pickle
+import colorsys
+import io
 
-def use_gpu(gpu_number=0):
+from . import metrics, omnipose
+
+try:
+    from skimage.morphology import remove_small_holes
+    SKIMAGE_ENABLED = True
+except:
+    SKIMAGE_ENABLED = False
+
+class TqdmToLogger(io.StringIO):
+    """
+        Output stream for TQDM which will output to logger module instead of
+        the StdOut.
+    """
+    logger = None
+    level = None
+    buf = ''
+    def __init__(self,logger,level=None):
+        super(TqdmToLogger, self).__init__()
+        self.logger = logger
+        self.level = level or logging.INFO
+    def write(self,buf):
+        self.buf = buf.strip('\r\n\t ')
+    def flush(self):
+        self.logger.log(self.level, self.buf)
+
+def rgb_to_hsv(arr):
+    rgb_to_hsv_channels = np.vectorize(colorsys.rgb_to_hsv)
+    r, g, b = np.rollaxis(arr, axis=-1)
+    h, s, v = rgb_to_hsv_channels(r, g, b)
+    hsv = np.stack((h,s,v), axis=-1)
+    return hsv
+
+def hsv_to_rgb(arr):
+    hsv_to_rgb_channels = np.vectorize(colorsys.hsv_to_rgb)
+    h, s, v = np.rollaxis(arr, axis=-1)
+    r, g, b = hsv_to_rgb_channels(h, s, v)
+    rgb = np.stack((r,g,b), axis=-1)
+    return rgb
+
+def download_url_to_file(url, dst, progress=True):
+    r"""Download object at the given URL to a local path.
+            Thanks to torch, slightly modified
+    Args:
+        url (string): URL of the object to download
+        dst (string): Full path where object will be saved, e.g. `/tmp/temporary_file`
+        progress (bool, optional): whether or not to display a progress bar to stderr
+            Default: True
+    """
+    file_size = None
+    import ssl
+    ssl._create_default_https_context = ssl._create_unverified_context
+    u = urlopen(url)
+    meta = u.info()
+    if hasattr(meta, 'getheaders'):
+        content_length = meta.getheaders("Content-Length")
+    else:
+        content_length = meta.get_all("Content-Length")
+    if content_length is not None and len(content_length) > 0:
+        file_size = int(content_length[0])
+    # We deliberately save it in a temp file and move it after
+    dst = os.path.expanduser(dst)
+    dst_dir = os.path.dirname(dst)
+    f = tempfile.NamedTemporaryFile(delete=False, dir=dst_dir)
     try:
-        _ = mx.nd.array([1, 2, 3], ctx=mx.gpu(gpu_number))
-        return True
-    except mx.MXNetError:
-        return False
+        with tqdm(total=file_size, disable=not progress,
+                  unit='B', unit_scale=True, unit_divisor=1024) as pbar:
+            while True:
+                buffer = u.read(8192)
+                if len(buffer) == 0:
+                    break
+                f.write(buffer)
+                pbar.update(len(buffer))
+        f.close()
+        shutil.move(f.name, dst)
+    finally:
+        f.close()
+        if os.path.exists(f.name):
+            os.remove(f.name)
 
-def taper_mask(bsize=224, sig=7.5):
-    xm = np.arange(bsize)
-    xm = np.abs(xm - xm.mean())
-    mask = 1/(1 + np.exp((xm - (bsize/2-20)) / sig))
-    mask = mask * mask[:, np.newaxis]
-    return mask
+def distance_to_boundary(masks):
+    """ get distance to boundary of mask pixels
+    
+    Parameters
+    ----------------
 
-def diameters(masks):
-    unique, counts = np.unique(np.int32(masks), return_counts=True)
-    counts = counts[1:]
-    md = np.median(counts**0.5)
-    if np.isnan(md):
-        md = 0
-    return md, counts**0.5
+    masks: int, 2D or 3D array 
+        size [Ly x Lx] or [Lz x Ly x Lx], 0=NO masks; 1,2,...=mask labels
+
+    Returns
+    ----------------
+
+    dist_to_bound: 2D or 3D array 
+        size [Ly x Lx] or [Lz x Ly x Lx]
+
+    """
+    if masks.ndim > 3 or masks.ndim < 2:
+        raise ValueError('distance_to_boundary takes 2D or 3D array, not %dD array'%masks.ndim)
+    dist_to_bound = np.zeros(masks.shape, np.float64)
+    
+    if masks.ndim==3:
+        for i in range(masks.shape[0]):
+            dist_to_bound[i] = distance_to_boundary(masks[i])
+        return dist_to_bound
+    else:
+        slices = find_objects(masks)
+        for i,si in enumerate(slices):
+            if si is not None:
+                sr,sc = si
+                mask = (masks[sr, sc] == (i+1)).astype(np.uint8)
+                contours = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                pvc, pvr = np.concatenate(contours[-2], axis=0).squeeze().T  
+                ypix, xpix = np.nonzero(mask)
+                min_dist = ((ypix[:,np.newaxis] - pvr)**2 + 
+                            (xpix[:,np.newaxis] - pvc)**2).min(axis=1)
+                dist_to_bound[ypix + sr.start, xpix + sc.start] = min_dist
+        return dist_to_bound
+
+def masks_to_edges(masks, threshold=1.0):
+    """ get edges of masks as a 0-1 array 
+    
+    Parameters
+    ----------------
+
+    masks: int, 2D or 3D array 
+        size [Ly x Lx] or [Lz x Ly x Lx], 0=NO masks; 1,2,...=mask labels
+
+    Returns
+    ----------------
+
+    edges: 2D or 3D array 
+        size [Ly x Lx] or [Lz x Ly x Lx], True pixels are edge pixels
+
+    """
+    dist_to_bound = distance_to_boundary(masks)
+    edges = (dist_to_bound < threshold) * (masks > 0)
+    return edges
+
+def remove_edge_masks(masks, change_index=True):
+    """ remove masks with pixels on edge of image
+    
+    Parameters
+    ----------------
+
+    masks: int, 2D or 3D array 
+        size [Ly x Lx] or [Lz x Ly x Lx], 0=NO masks; 1,2,...=mask labels
+
+    change_index: bool (optional, default True)
+        if True, after removing masks change indexing so no missing label numbers
+
+    Returns
+    ----------------
+
+    outlines: 2D or 3D array 
+        size [Ly x Lx] or [Lz x Ly x Lx], 0=NO masks; 1,2,...=mask labels
+
+    """
+    slices = find_objects(masks.astype(int))
+    for i,si in enumerate(slices):
+        remove = False
+        if si is not None:
+            for d,sid in enumerate(si):
+                if sid.start==0 or sid.stop==masks.shape[d]:
+                    remove=True
+                    break  
+            if remove:
+                masks[si][masks[si]==i+1] = 0
+    shape = masks.shape
+    if change_index:
+        _,masks = np.unique(masks, return_inverse=True)
+        masks = np.reshape(masks, shape).astype(np.int32)
+
+    return masks
+
+def masks_to_outlines(masks):
+    """ get outlines of masks as a 0-1 array 
+    
+    Parameters
+    ----------------
+
+    masks: int, 2D or 3D array 
+        size [Ly x Lx] or [Lz x Ly x Lx], 0=NO masks; 1,2,...=mask labels
+
+    Returns
+    ----------------
+
+    outlines: 2D or 3D array 
+        size [Ly x Lx] or [Lz x Ly x Lx], True pixels are outlines
+
+    """
+    if masks.ndim > 3 or masks.ndim < 2:
+        raise ValueError('masks_to_outlines takes 2D or 3D array, not %dD array'%masks.ndim)
+    outlines = np.zeros(masks.shape, bool)
+    
+    if masks.ndim==3:
+        for i in range(masks.shape[0]):
+            outlines[i] = masks_to_outlines(masks[i])
+        return outlines
+    else:
+        slices = find_objects(masks.astype(int))
+        for i,si in enumerate(slices):
+            if si is not None:
+                sr,sc = si
+                mask = (masks[sr, sc] == (i+1)).astype(np.uint8)
+                contours = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                pvc, pvr = np.concatenate(contours[-2], axis=0).squeeze().T            
+                vr, vc = pvr + sr.start, pvc + sc.start 
+                outlines[vr, vc] = 1
+        return outlines
+
+def outlines_list(masks):
+    """ get outlines of masks as a list to loop over for plotting """
+    outpix=[]
+    for n in np.unique(masks)[1:]:
+        mn = masks==n
+        if mn.sum() > 0:
+            contours = cv2.findContours(mn.astype(np.uint8), mode=cv2.RETR_EXTERNAL, method=cv2.CHAIN_APPROX_NONE)
+            contours = contours[-2]
+            cmax = np.argmax([c.shape[0] for c in contours])
+            pix = contours[cmax].astype(int).squeeze()
+            if len(pix)>4:
+                outpix.append(pix)
+            else:
+                outpix.append(np.zeros((0,2)))
+    return outpix
+
+def get_perimeter(points):
+    """ perimeter of points - npoints x ndim """
+    if points.shape[0]>4:
+        points = np.append(points, points[:1], axis=0)
+        return ((np.diff(points, axis=0)**2).sum(axis=1)**0.5).sum()
+    else:
+        return 0
+
+def get_mask_compactness(masks):
+    perimeters = get_mask_perimeters(masks)
+    #outlines = masks_to_outlines(masks)
+    #perimeters = np.unique(outlines*masks, return_counts=True)[1][1:]
+    npoints = np.unique(masks, return_counts=True)[1][1:]
+    areas = npoints
+    compactness =  4 * np.pi * areas / perimeters**2
+    compactness[perimeters==0] = 0
+    compactness[compactness>1.0] = 1.0
+    return compactness
+
+def get_mask_perimeters(masks):
+    """ get perimeters of masks """
+    perimeters = np.zeros(masks.max())
+    for n in range(masks.max()):
+        mn = masks==(n+1)
+        if mn.sum() > 0:
+            contours = cv2.findContours(mn.astype(np.uint8), mode=cv2.RETR_EXTERNAL,
+                                        method=cv2.CHAIN_APPROX_NONE)[-2]
+            #cmax = np.argmax([c.shape[0] for c in contours])
+            #perimeters[n] = get_perimeter(contours[cmax].astype(int).squeeze())
+            perimeters[n] = np.array([get_perimeter(c.astype(int).squeeze()) for c in contours]).sum()
+
+    return perimeters
+
+def circleMask(d0):
+    """ creates array with indices which are the radius of that x,y point
+        inputs:
+            d0 (patch of (-d0,d0+1) over which radius computed
+        outputs:
+            rs: array (2*d0+1,2*d0+1) of radii
+            dx,dy: indices of patch
+    """
+    dx  = np.tile(np.arange(-d0[1],d0[1]+1), (2*d0[0]+1,1))
+    dy  = np.tile(np.arange(-d0[0],d0[0]+1), (2*d0[1]+1,1))
+    dy  = dy.transpose()
+
+    rs  = (dy**2 + dx**2) ** 0.5
+    return rs, dx, dy
+
+def get_mask_stats(masks_true):
+    mask_perimeters = get_mask_perimeters(masks_true)
+
+    # disk for compactness
+    rs,dy,dx = circleMask(np.array([100, 100]))
+    rsort = np.sort(rs.flatten())
+
+    # area for solidity
+    npoints = np.unique(masks_true, return_counts=True)[1][1:]
+    areas = npoints - mask_perimeters / 2 - 1
+    
+    compactness = np.zeros(masks_true.max())
+    convexity = np.zeros(masks_true.max())
+    solidity = np.zeros(masks_true.max())
+    convex_perimeters = np.zeros(masks_true.max())
+    convex_areas = np.zeros(masks_true.max())
+    for ic in range(masks_true.max()):
+        points = np.array(np.nonzero(masks_true==(ic+1))).T
+        if len(points)>15 and mask_perimeters[ic] > 0:
+            med = np.median(points, axis=0)
+            # compute compactness of ROI
+            r2 = ((points - med)**2).sum(axis=1)**0.5
+            compactness[ic] = (rsort[:r2.size].mean() + 1e-10) / r2.mean()
+            try:
+                hull = ConvexHull(points)
+                convex_perimeters[ic] = hull.area
+                convex_areas[ic] = hull.volume
+            except:
+                convex_perimeters[ic] = 0
+                
+    convexity[mask_perimeters>0.0] = (convex_perimeters[mask_perimeters>0.0] / 
+                                      mask_perimeters[mask_perimeters>0.0])
+    solidity[convex_areas>0.0] = (areas[convex_areas>0.0] / 
+                                     convex_areas[convex_areas>0.0])
+    convexity = np.clip(convexity, 0.0, 1.0)
+    solidity = np.clip(solidity, 0.0, 1.0)
+    compactness = np.clip(compactness, 0.0, 1.0)
+    return convexity, solidity, compactness
+
+def get_masks_unet(output, cell_threshold=0, boundary_threshold=0):
+    """ create masks using cell probability and cell boundary """
+    cells = (output[...,1] - output[...,0])>cell_threshold
+    selem = generate_binary_structure(cells.ndim, connectivity=1)
+    labels, nlabels = label(cells, selem)
+
+    if output.shape[-1]>2:
+        slices = find_objects(labels)
+        dists = 10000*np.ones(labels.shape, np.float32)
+        mins = np.zeros(labels.shape, np.int32)
+        borders = np.logical_and(~(labels>0), output[...,2]>boundary_threshold)
+        pad = 10
+        for i,slc in enumerate(slices):
+            if slc is not None:
+                slc_pad = tuple([slice(max(0,sli.start-pad), min(labels.shape[j], sli.stop+pad))
+                                    for j,sli in enumerate(slc)])
+                msk = (labels[slc_pad] == (i+1)).astype(np.float32)
+                msk = 1 - gaussian_filter(msk, 5)
+                dists[slc_pad] = np.minimum(dists[slc_pad], msk)
+                mins[slc_pad][dists[slc_pad]==msk] = (i+1)
+        labels[labels==0] = borders[labels==0] * mins[labels==0]
+        
+    masks = labels
+    shape0 = masks.shape
+    _,masks = np.unique(masks, return_inverse=True)
+    masks = np.reshape(masks, shape0)
+    return masks
+
+def stitch3D(masks, stitch_threshold=0.25):
+    """ stitch 2D masks into 3D volume with stitch_threshold on IOU """
+    mmax = masks[0].max()
+    for i in range(len(masks)-1):
+        iou = metrics._intersection_over_union(masks[i+1], masks[i])[1:,1:]
+        if iou.size > 0:
+            iou[iou < stitch_threshold] = 0.0
+            iou[iou < iou.max(axis=0)] = 0.0
+            istitch = iou.argmax(axis=1) + 1
+            ino = np.nonzero(iou.max(axis=1)==0.0)[0]
+            istitch[ino] = np.arange(mmax+1, mmax+len(ino)+1, 1, int)
+            mmax += len(ino)
+            istitch = np.append(np.array(0), istitch)
+            masks[i+1] = istitch[masks[i+1]]
+    return masks
+
+# merged deiameter functions
+def diameters(masks, omni=False, dist_threshold=1):
+    if not omni: #original 'equivalent area circle' diameter
+        _, counts = np.unique(np.int32(masks), return_counts=True)
+        counts = counts[1:]
+        md = np.median(counts**0.5)
+        if np.isnan(md):
+            md = 0
+        md /= (np.pi**0.5)/2
+        return md, counts**0.5
+    else: #new distance-field-derived diameter (aggrees with cicle but more general)
+        return omnipose.core.diameters(masks), None
+
 
 def radius_distribution(masks, bins):
     unique, counts = np.unique(masks, return_counts=True)
@@ -41,328 +390,12 @@ def radius_distribution(masks, bins):
     md = np.median(counts**0.5)*0.5
     if np.isnan(md):
         md = 0
+    md /= (np.pi**0.5)/2
     return nb, md, (counts**0.5)/2
 
-def X2zoom(img, X2=1):
-    ny,nx = img.shape[:2]
-    img = cv2.resize(img, (int(nx * (2**X2)), int(ny * (2**X2))))
-    return img
-
-def image_resizer(img, resize=512, to_uint8=False):
-    ny,nx = img.shape[:2]
-    if to_uint8:
-        if img.max()<=255 and img.min()>=0 and img.max()>1:
-            img = img.astype(np.uint8)
-        else:
-            img = img.astype(np.float32)
-            img -= img.min()
-            img /= img.max()
-            img *= 255
-            img = img.astype(np.uint8)
-    if np.array(img.shape).max() > resize:
-        if ny>nx:
-            nx = int(nx/ny * resize)
-            ny = resize
-        else:
-            ny = int(ny/nx * resize)
-            nx = resize
-        shape = (nx,ny)
-        img = cv2.resize(img, shape)
-        img = img.astype(np.uint8)
-    return img
-
-def normalize99(img):
-    X = img.copy()
-    X = (X - np.percentile(X, 1)) / (np.percentile(X, 99) - np.percentile(X, 1))
-    return X
-
-def gabors(npix):
-    ''' npix - size of gabor patch (should be ODD)'''
-    y,x=np.meshgrid(np.arange(npix),np.arange(npix))
-    sigma = 1
-    f = 0.1
-    theta = np.linspace(0, 2*np.pi, 33)[:-1]
-    theta = theta[:,np.newaxis,np.newaxis]
-    ycent,xcent = y.mean(), x.mean()
-    yc = y - ycent
-    xc = x - xcent
-    ph = np.pi/2
-
-    xc = xc[np.newaxis,:,:]
-    yc = yc[np.newaxis,:,:]
-    G = np.exp(-(xc**2 + yc**2) / (2*sigma**2)) * np.cos(ph + f * (yc*np.cos(theta) + xc*np.sin(theta)))
-
-    return G
-
-def format_data(X,Y):
-    nimg = len(Y)
-    vf = []
-
-    t0 = time.time()
-
-    Rs = np.zeros(nimg)
-    for j in range(nimg):
-        Ly, Lx = Y[j].shape
-        xm, ym = np.meshgrid(np.arange(Lx),  np.arange(Ly))
-        unqY = np.unique(Y[j])
-        img = np.float32(X[j])
-        #img = (img - img.mean())/np.std(img)
-
-        labels = np.int32(Y[j])
-
-        Ly, Lx = img.shape
-        xm, ym = np.meshgrid(np.arange(Lx),  np.arange(Ly))
-        unqY = np.unique(labels)
-
-        ix = labels==0
-
-        img = (img - np.percentile(img, 1)) / (np.percentile(img, 99) - np.percentile(img, 1))
-
-        V = np.zeros((4,Ly,Lx), 'float32')
-        V[0] = img
-
-        #V[1], V[2], maskE = compute_flow(Y[j])
-        #V[3] = np.float32(labels>.5) + np.float32(maskE>.5)
-        V[1], V[2] = new_flow(Y[j])
-        V[3] = np.float32(labels>.5)
-        vf.append(V)
-
-        if j%20==1:
-            print(j, time.time()-t0)
-    return vf
-
-def extendROI(ypix, xpix, Ly, Lx,niter=1):
-    for k in range(niter):
-        yx = ((ypix, ypix, ypix, ypix-1, ypix+1), (xpix, xpix+1,xpix-1,xpix,xpix))
-        yx = np.array(yx)
-        yx = yx.reshape((2,-1))
-        yu = np.unique(yx, axis=1)
-        ix = np.all((yu[0]>=0, yu[0]<Ly, yu[1]>=0 , yu[1]<Lx), axis = 0)
-        ypix,xpix = yu[:, ix]
-    return ypix,xpix
-
-def get_mask(y, rpad=20, nmax=20):
-    xp = y[1,:,:].flatten().astype('int32')
-    yp = y[0,:,:].flatten().astype('int32')
-    _, Ly, Lx = y.shape
-    xm, ym = np.meshgrid(np.arange(Lx),  np.arange(Ly))
-
-    xedges = np.arange(-.5-rpad, xm.shape[1]+.5+rpad, 1)
-    yedges = np.arange(-.5-rpad, xm.shape[0]+.5+rpad, 1)
-    #xp = (xm-dx).flatten().astype('int32')
-    #yp = (ym-dy).flatten().astype('int32')
-    h,_,_ = np.histogram2d(xp, yp, bins=[xedges, yedges])
-
-    hmax = maximum_filter1d(h, 5, axis=0)
-    hmax = maximum_filter1d(hmax, 5, axis=1)
-
-    yo, xo = np.nonzero(np.logical_and(h-hmax>-1e-6, h>10))
-    Nmax = h[yo, xo]
-    isort = np.argsort(Nmax)[::-1]
-    yo, xo = yo[isort], xo[isort]
-    pix = []
-    for t in range(len(yo)):
-        pix.append([yo[t],xo[t]])
-
-    for iter in range(5):
-        for k in range(len(pix)):
-            ye, xe = extendROI(pix[k][0], pix[k][1], h.shape[0], h.shape[1], 1)
-            igood = h[ye, xe]>2
-            ye, xe = ye[igood], xe[igood]
-            pix[k][0] = ye
-            pix[k][1] = xe
-
-    ibad = np.ones(len(pix), 'bool')
-    for k in range(len(pix)):
-        #print(pix[k][0].size)
-        if pix[k][0].size<nmax:
-            ibad[k] = 0
-
-    #pix = [pix[k] for k in ibad.nonzero()[0]]
-
-    M = np.zeros(h.shape)
-    for k in range(len(pix)):
-        M[pix[k][0],    pix[k][1]] = 1+k
-
-    M0 = M[rpad + xp, rpad + yp]
-    M0 = np.reshape(M0, xm.shape)
-    return M0, pix
-
-
-def pad_image_CS0(img0, div=16):
-    Lpad = int(div * np.ceil(img0.shape[-2]/div) - img0.shape[-2])
-    xpad1 = Lpad//2
-    xpad2 = Lpad - xpad1
-    Lpad = int(div * np.ceil(img0.shape[-1]/div) - img0.shape[-1])
-    ypad1 = Lpad//2
-    ypad2 = Lpad - ypad1
-
-    if img0.ndim>3:
-        pads = np.array([[0,0], [0,0], [xpad1,xpad2], [ypad1, ypad2]])
-    else:
-        pads = np.array([[0,0], [xpad1,xpad2], [ypad1, ypad2]])
-
-    I = np.pad(img0,pads, mode='constant')
-    return I, pads
-
-def pad_image_CS(img0, div=16, extra = 1):
-    Lpad = int(div * np.ceil(img0.shape[-2]/div) - img0.shape[-2])
-    xpad1 = extra*div//2 + Lpad//2
-    xpad2 = extra*div//2 + Lpad - Lpad//2
-    Lpad = int(div * np.ceil(img0.shape[-1]/div) - img0.shape[-1])
-    ypad1 = extra*div//2 + Lpad//2
-    ypad2 = extra*div//2+Lpad - Lpad//2
-
-    if img0.ndim>3:
-        pads = np.array([[0,0], [0,0], [xpad1,xpad2], [ypad1, ypad2]])
-    else:
-        pads = np.array([[0,0], [xpad1,xpad2], [ypad1, ypad2]])
-
-    I = np.pad(img0,pads, mode='constant')
-    return I,pads
-
-def run_tile(net, imgi, bsize=224, device=mx.cpu()):
-    nchan, Ly0, Lx0 = imgi.shape[-3:]
-    if Ly0<bsize:
-        imgi = np.concatenate((imgi, np.zeros((nchan,bsize-Ly0, Lx0))), axis=1)
-        Ly0 = bsize
-    if Lx0<bsize:
-        imgi = np.concatenate((imgi, np.zeros((nchan,Ly0, bsize-Lx0))), axis=2)
-    Ly, Lx = imgi.shape[-2:]
-
-
-    ystart = np.arange(0, Ly-bsize//2, int(bsize//2))
-    xstart = np.arange(0, Lx-bsize//2, int(bsize//2))
-
-    ystart = np.maximum(0, np.minimum(Ly-bsize, ystart))
-    xstart = np.maximum(0, np.minimum(Lx-bsize, xstart))
-
-    ysub = []
-    xsub = []
-
-    IMG = np.zeros((len(ystart), len(xstart), nchan,  bsize,bsize))
-    k = 0
-    for j in range(len(ystart)):
-        for i in range(len(xstart)):
-            ysub.append([ystart[j], ystart[j]+bsize])
-            xsub.append([xstart[i], xstart[i]+bsize])
-
-            IMG[j,i,:,:,:] = imgi[:, ysub[-1][0]:ysub[-1][1],  xsub[-1][0]:xsub[-1][1]]
-
-    IMG = np.reshape(IMG, (-1, nchan, bsize,bsize))
-
-    if True:
-        for k in range(IMG.shape[0]):
-            if k%4==1:
-                IMG[k, :,:, :] = IMG[k, :,::-1, :]
-            if k%4==2:
-                IMG[k, :,:, :] = IMG[k, :,:, ::-1]
-            if k%4==3:
-                IMG[k, :,:, :] = IMG[k,:, ::-1, ::-1]
-
-
-    X = nd.array(IMG, ctx=device)
-    nbatch = 8
-    niter = int(np.ceil(IMG.shape[0]/nbatch))
-    nout = 3
-    y = np.zeros((IMG.shape[0], nout, bsize,bsize))
-
-    for k in range(niter):
-        irange = np.arange(nbatch*k, min(IMG.shape[0], nbatch*k+nbatch))
-        y0, style = net(X[irange])
-        y[irange] = y0[:,:,:,:].asnumpy()
-        if k==0:
-            styles = np.zeros(style.shape[1], np.float32)
-        styles += style.asnumpy().sum(axis=0)
-    styles /= IMG.shape[0]
-
-    if True:
-        for k in range(y.shape[0]):
-            if k%4==1:
-                y[k, :,:, :] = y[k, :,::-1, :]
-                y[k,0,:,:] *= -1
-            if k%4==2:
-                y[k, :,:, :] = y[k, :,:, ::-1]
-                y[k,1,:,:] *= -1
-            if k%4==3:
-                y[k, :,:, :] = y[k, :,::-1, ::-1]
-                y[k,0,:,:] *= -1
-                y[k,1,:,:] *= -1
-
-
-    Navg = np.zeros((Ly,Lx))
-    ytiled = np.zeros((nout, Ly, Lx), 'float32')
-    xm = np.arange(bsize)
-    xm = np.abs(xm - xm.mean())
-    sig = 10.
-    mask = 1/(1 + np.exp((xm - (bsize/2-20.)) / sig))
-    mask = mask * mask[:, np.newaxis]
-
-    for j in range(len(ysub)):
-        ytiled[:, ysub[j][0]:ysub[j][1],  xsub[j][0]:xsub[j][1]] += y[j] * mask
-        Navg[ysub[j][0]:ysub[j][1],  xsub[j][0]:xsub[j][1]] += mask
-    ytiled /=Navg
-
-    ytiled = ytiled[:,:Ly0, :Lx0]
-    return ytiled, styles
-
-def run_resize_tile(net, img, rsz, bsize=224, device=mx.cpu()):
-    Ly = int(img.shape[0] * rsz)
-    Lx = int(img.shape[1] * rsz)
-
-    IMG = cv2.resize(img, (Lx, Ly))
-    if IMG.ndim<3:
-        IMG = np.expand_dims(IMG, axis=-1)
-    imgi = np.transpose(IMG, (2,0,1))
-    imgi, ysub, xsub = pad_image(imgi)
-
-    y,style = run_tile(net, imgi, bsize, device=device)
-    yup = np.transpose(y, (1,2,0))
-    yup = yup[np.ix_(ysub, xsub, np.arange(yup.shape[-1]))]
-
-    yup = cv2.resize(yup, (img.shape[1], img.shape[0]))
-    return yup, style
-
-def run_resize(net, img, rsz, device=mx.cpu()):
-    Ly = int(img.shape[0] * rsz)
-    Lx = int(img.shape[1] * rsz)
-
-
-    IMG = cv2.resize(img, (Lx, Ly))
-    if IMG.ndim<3:
-        IMG = np.expand_dims(IMG, axis=-1)
-
-    imgi, ysub, xsub = pad_image(np.transpose(IMG, (2,0,1)))
-
-    imgi = np.expand_dims(imgi, 0)
-
-    X = nd.array(imgi, ctx=device)
-    y, style = net(X)
-    y = y.asnumpy()
-    style = style.asnumpy()
-
-    yup = np.transpose(y[0], (1,2,0))
-    yup = yup[np.ix_(ysub, xsub, np.arange(y.shape[1]))]
-
-    yup = cv2.resize(yup, (img.shape[1], img.shape[0]))
-    return yup, style
-
-def pad_image(img0, div=16, extra = 1):
-    nc, Ly, Lx = img0.shape
-    Lpad = int(div * np.ceil(Ly/div) - Ly)
-
-    xpad1 = extra*div//2 + Lpad//2
-    xpad2 = extra*div//2 + Lpad - Lpad//2
-    Lpad = int(div * np.ceil(Lx/div) - Lx)
-    ypad1 = extra*div//2 + Lpad//2
-    ypad2 = extra*div//2+Lpad - Lpad//2
-
-    pads = np.array([[0,0], [xpad1,xpad2], [ypad1, ypad2]])
-
-    ysub = np.arange(xpad1, xpad1+Ly)
-    xsub = np.arange(ypad1, ypad1+Lx)
-    I = np.pad(img0,pads, mode='constant')
-    return I, ysub, xsub
+def size_distribution(masks):
+    counts = np.unique(masks, return_counts=True)[1][1:]
+    return np.percentile(counts, 25) / np.percentile(counts, 75)
 
 def process_cells(M0, npix=20):
     unq, ic = np.unique(M0, return_counts=True)
@@ -371,29 +404,90 @@ def process_cells(M0, npix=20):
             M0[M0==unq[j]] = 0
     return M0
 
-def run_dynamics(y, niter = 200, eta=.1,p=0.):
-    x0, y0 = np.meshgrid(np.arange(y.shape[-1]),  np.arange(y.shape[-2]))
+# Edited slightly to only remove small holes(under min_size) to avoid filling in voids formed by cells touching themselves
+# (Masks show this, outlines somehow do not. Also need to find a way to split self-contact points).
+def fill_holes_and_remove_small_masks(masks, min_size=15, hole_size=3, scale_factor=1):
+    """ fill holes in masks (2D/3D) and discard masks smaller than min_size (2D)
+    
+    fill holes in each mask using scipy.ndimage.morphology.binary_fill_holes
+    
+    Parameters
+    ----------------
 
-    y = np.squeeze(y)
-    xs, ys = x0.copy(), y0.copy()
-    yout = np.zeros(y.shape)
-    nc, Ly, Lx = y.shape
+    masks: int, 2D or 3D array
+        labelled masks, 0=NO masks; 1,2,...=mask labels,
+        size [Ly x Lx] or [Lz x Ly x Lx]
 
-    dx = y[0,:,:]
-    dy = y[1,:,:]
+    min_size: int (optional, default 15)
+        minimum number of pixels per mask, can turn off with -1
 
-    ox = dx
-    oy = dy
-    for j in range(niter):
-        xi = xs.astype('int')
-        yi = ys.astype('int')
-        xi = np.clip(xi, 0, Lx-1)
-        yi = np.clip(yi, 0, Ly-1)
+    Returns
+    ---------------
 
-        ox = p * ox + dx[yi, xi]
-        oy = p * oy + dy[yi, xi]
-        xs = np.clip(xs - eta*ox, 0, Lx-1)
-        ys = np.clip(ys - eta*oy, 0, Ly-1)
-    yout[0] = ys
-    yout[1] = xs
-    return yout
+    masks: int, 2D or 3D array
+        masks with holes filled and masks smaller than min_size removed, 
+        0=NO masks; 1,2,...=mask labels,
+        size [Ly x Lx] or [Lz x Ly x Lx]
+    
+    """
+
+    if masks.ndim==2:
+        masks = omnipose.utils.format_labels(masks, min_area=min_size) # not sure how this works with 3D... tests pass though
+    
+    hole_size *= scale_factor
+        
+    if masks.ndim > 3 or masks.ndim < 2:
+        raise ValueError('masks_to_outlines takes 2D or 3D array, not %dD array'%masks.ndim)
+    
+    slices = find_objects(masks)
+    j = 0
+    for i,slc in enumerate(slices):
+        if slc is not None:
+            msk = masks[slc] == (i+1)
+            npix = msk.sum()
+            if min_size > 0 and npix < min_size:
+                masks[slc][msk] = 0
+            else:   
+                hsz = np.count_nonzero(msk)*hole_size/100 #turn hole size into percentage
+                #eventually the boundary output should be used to properly exclude real holes vs label gaps 
+                if msk.ndim==3:
+                    for k in range(msk.shape[0]):
+                        # Omnipose version (breaks 3D tests)
+                        # padmsk = remove_small_holes(np.pad(msk[k],1,mode='constant'),hsz)
+                        # msk[k] = padmsk[1:-1,1:-1]
+                        
+                        #Cellpose version
+                        msk[k] = binary_fill_holes(msk[k])
+
+                else:          
+                    if SKIMAGE_ENABLED: # Omnipose version (passes 2D tests)
+                        padmsk = remove_small_holes(np.pad(msk,1,mode='constant'),hsz)
+                        msk = padmsk[1:-1,1:-1]
+                    else: #Cellpose version
+                        msk = binary_fill_holes(msk)
+                masks[slc][msk] = (j+1)
+                j+=1
+    return masks
+
+
+    # if masks.ndim > 3 or masks.ndim < 2:
+    #     raise ValueError('fill_holes_and_remove_small_masks takes 2D or 3D array, not %dD array'%masks.ndim)
+    # slices = find_objects(masks)
+    # j = 0
+    # for i,slc in enumerate(slices):
+    #     if slc is not None:
+    #         msk = masks[slc] == (i+1)
+    #         npix = msk.sum()
+    #         if min_size > 0 and npix < min_size:
+    #             masks[slc][msk] = 0
+    #         else:    
+    #             if msk.ndim==3:
+    #                 for k in range(msk.shape[0]):
+    #                     msk[k] = binary_fill_holes(msk[k])
+    #             else:
+    #                 msk = binary_fill_holes(msk)
+    #             masks[slc][msk] = (j+1)
+    #             j+=1
+    # return masks
+
+
