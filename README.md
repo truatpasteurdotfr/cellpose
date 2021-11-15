@@ -15,6 +15,8 @@
 [![GitHub stars](https://img.shields.io/github/stars/MouseLand/cellpose?style=social)](https://github.com/MouseLand/cellpose/)
 [![GitHub forks](https://img.shields.io/github/forks/MouseLand/cellpose?style=social)](https://github.com/MouseLand/cellpose/)
 [![Docker and Singularity build](https://github.com/truatpasteurdotfr/cellpose/actions/workflows/docker-singularity-publish.yml/badge.svg)](https://github.com/truatpasteurdotfr/cellpose/actions/workflows/docker-singularity-publish.yml)
+
+### (gpu enabled) ready to use containers (at your own risks!)
 Docker:
 ```
 docker pull ghcr.io/truatpasteurdotfr/cellpose:master
