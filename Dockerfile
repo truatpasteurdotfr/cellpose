@@ -3,7 +3,7 @@ FROM continuumio/miniconda3:master
 RUN apt-get update && \
     apt-get install -y && \
     apt-get install -y wget bzip2 && \
-    apt-get install -y libglu1-mesa 
+    apt-get install -y libglu1-mesa  libgl1-mesa-dri 
 
 # https://github.com/MouseLand/cellpose/blob/master/.github/workflows/test_and_deploy.yml
 RUN apt-get update && apt-get install -y \
