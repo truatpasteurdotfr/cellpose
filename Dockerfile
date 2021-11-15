@@ -1,4 +1,4 @@
-FROM continuumio/miniconda3
+FROM continuumio/miniconda3:master
 
 RUN apt-get update && \
     apt-get install -y && \
@@ -6,7 +6,7 @@ RUN apt-get update && \
     apt-get install -y libglu1-mesa 
 
 # https://github.com/MouseLand/cellpose/blob/master/.github/workflows/test_and_deploy.yml
-RUN apt-get install -y \
+RUN apt-get update && apt-get install -y \
           libfontconfig1 libfreetype6 libxcb-xinerama0 \
           libxcb-shape0 libxcb-util1 \
           libdbus-1-3 libxkbcommon-x11-0 libxcb-icccm4 \
