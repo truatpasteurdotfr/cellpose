@@ -1,4 +1,4 @@
-# <p>  <b>Cellpose | </b> <img src="https://raw.githubusercontent.com/kevinjohncutler/cellpose/master/omnipose/logo.png?raw=True" height="33" title="omnipose" alt="omnipose" align="absmiddle" /> </p>
+# <p>  <b>Cellpose </b> </p>
 <img src="https://raw.githubusercontent.com/kevinjohncutler/cellpose/master/cellpose/logo/logo.png?raw=True" width="250" title="cellpose" alt="cellpose" align="right" vspace = "50">
 
 [![Documentation Status](https://readthedocs.org/projects/cellpose/badge/?version=latest)](https://cellpose.readthedocs.io/en/latest/?badge=latest)
@@ -28,15 +28,31 @@ singularity shell oras://ghcr.io/truatpasteurdotfr/cellpose:latest
 
 A generalist algorithm for cell and nucleus segmentation. 
 
-Cellpose was written by Carsen Stringer and Marius Pachitariu. To learn about Cellpose, read the [paper](https://t.co/kBMXmPp3Yn?amp=1) or watch the [talk](https://t.co/JChCsTD0SK?amp=1). For support, please open an [issue](https://github.com/MouseLand/cellpose/issues). 
+Cellpose was written by Carsen Stringer and Marius Pachitariu. To learn about Cellpose, read the [paper](https://t.co/kBMXmPp3Yn?amp=1) or watch the [talk](https://t.co/JChCsTD0SK?amp=1). For support, please open an [issue](https://github.com/MouseLand/cellpose/issues). If you use Cellpose in your work please cite the paper.
 
-Omnipose was written by Kevin Cutler ([@kevinjohncutler](https://github.com/kevinjohncutler)). To learn about Omnipose, read the [paper](http://biorxiv.org/content/early/2021/11/04/2021.11.03.467199), and check out the [README](cellpose/omnipose/README.md). 
+If you want to improve Cellpose for yourself and for everyone else, please consider contributing manual segmentations for a few of your images via the built-in GUI interface (see instructions below). 
 
-If you want to improve Cellpose/Omnipose for yourself and for everyone else, please consider contributing manual segmentations for a few of your images via the built-in GUI interface (see instructions below). 
+### :star2: UPDATE v2.0 (April 2022) :star2:
+
+Cellpose 2.0 now allows human-in-the-loop training of models! Check out the twitter [thread](twitter) and [preprint](biorxiv) for details.
+
+Read how to use it yourself in the [docs](docs), and check out the full human-in-the-loop 
+[![video](https://img.youtube.com/vi/3Y1VKcxjNy4/default.jpg)](https://youtu.be/3Y1VKcxjNy4)
+
+### UPDATE v1.0 (Jan 2022)
+
+Cellpose has been relatively stable for a while now. Small bugs will continue to be fixed, but we are now releasing a reference 1.0 version. Larger updates to Cellpose will go towards a new 2.0 candidate version to be released soon.  
+
+This update fixes bugs in GUI and plotting. It also stops model weight reloading to improve speed. `resample=True` is default again as in earlier releases, turn off with `--no_resample`. Now logging is turned off by default. Turn on in CLI with `--verbose` flag or in a script/notebook by
+```
+from cellpose.io import logger_setup
+logger_setup();
+```
 
 ### UPDATE v0.7 (Nov 2021)
 
-Omnipose is now officially available and supported as part of Cellpose. Use the 'omni' flag and models to take advantage of it for long cells! (<i>E.g.</i>, filamentous bacteria.) Many additonal options are available and we will be updating the documentation shortly. 
+[Omnipose](https://github.com/kevinjohncutler/omnipose) is now officially available and supported as part of Cellpose. `pip install omnipose` and use the 'omni' flag and models to take advantage of it for long cells! (<i>E.g.</i>, filamentous bacteria.) Omnipose was written by Kevin Cutler ([@kevinjohncutler](https://github.com/kevinjohncutler)). To learn about Omnipose, read the [paper](http://biorxiv.org/content/early/2021/11/04/2021.11.03.467199). If you use Omnipose in your work please cite the Cellpose paper and the Omnipose paper.
+
 
 ### UPDATE v0.6 (Dec 2020)
 
@@ -50,7 +66,7 @@ You can quickly try out Cellpose on the [website](https://www.cellpose.org) firs
 
 You can also run Cellpose in google colab with a GPU: 
 * a code-based notebook: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MouseLand/cellpose/blob/master/notebooks/run_cellpose_GPU.ipynb)
-* a more user-friendly notebook for 2D segmentation written by [@pr4deepr](https://github.com/pr4deepr): [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MouseLand/cellpose/blob/master/notebooks/Cellpose_2D_v0_1.ipynb)
+* a more user-friendly notebook for 2D segmentation written by [@pr4deepr](https://github.com/pr4deepr): [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MouseLand/cellpose/blob/master/notebooks/Cellpose_cell_segmentation_2D_prediction_only.ipynb)
 * a user-friendly [ZeroCostDL4Mic](https://github.com/HenriquesLab/ZeroCostDL4Mic) notebook that includes training cellpose models, written by [@guijacquemet](https://github.com/guijacquemet): [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HenriquesLab/ZeroCostDL4Mic/blob/master/Colab_notebooks/Beta%20notebooks/Cellpose_2D_ZeroCostDL4Mic.ipynb)
 
 The colab notebooks are recommended if you have issues with MKL or run speed on your local computer (and are running 3D volumes). Colab does not allow you to run the GUI, but you can save `*_seg.npy` files in colab that you can download and open in the GUI.

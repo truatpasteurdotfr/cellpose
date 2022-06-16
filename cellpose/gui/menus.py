@@ -12,6 +12,10 @@ def mainmenu(parent):
     loadImg.triggered.connect(lambda: io._load_image(parent))
     file_menu.addAction(loadImg)
 
+    parent.autoloadMasks = QAction("Autoload masks from _masks.tif file", parent, checkable=True)
+    parent.autoloadMasks.setChecked(False)
+    file_menu.addAction(parent.autoloadMasks)
+    
     parent.loadMasks = QAction("Load &masks (*.tif, *.png, *.jpg)", parent)
     parent.loadMasks.setShortcut("Ctrl+M")
     parent.loadMasks.triggered.connect(lambda: io._load_masks(parent))
@@ -22,11 +26,6 @@ def mainmenu(parent):
     loadManual.setShortcut("Ctrl+P")
     loadManual.triggered.connect(lambda: io._load_seg(parent))
     file_menu.addAction(loadManual)
-
-    #loadStack = QAction("Load &numpy z-stack (*.npy nimgs x nchan x pixels x pixels)", parent)
-    #loadStack.setShortcut("Ctrl+N")
-    #loadStack.triggered.connect(lambda: parent.load_zstack(None))
-    #file_menu.addAction(loadStack)
 
     parent.saveSet = QAction("&Save masks and image (as *_seg.npy)", parent)
     parent.saveSet.setShortcut("Ctrl+S")
@@ -45,19 +44,11 @@ def mainmenu(parent):
     parent.saveOutlines.triggered.connect(lambda: io._save_outlines(parent))
     file_menu.addAction(parent.saveOutlines)
     parent.saveOutlines.setEnabled(False)
-
+    
     parent.saveServer = QAction("Send manually labelled data to server", parent)
     parent.saveServer.triggered.connect(lambda: save_server(parent))
     file_menu.addAction(parent.saveServer)
     parent.saveServer.setEnabled(False)
-
-    parent.switchBackend = QAction("Switch backend to MXNET if installed", parent)
-    parent.switchBackend.triggered.connect(lambda: parent.check_gpu(False))
-    file_menu.addAction(parent.switchBackend)
-    if models.MXNET_ENABLED:
-        parent.switchBackend.setEnabled(True)
-    else:
-        parent.switchBackend.setEnabled(False)
 
 def editmenu(parent):
     main_menu = parent.menuBar()
@@ -85,6 +76,32 @@ def editmenu(parent):
     parent.remcell.triggered.connect(parent.remove_action)
     parent.remcell.setEnabled(False)
     edit_menu.addAction(parent.remcell)
+
+    parent.mergecell = QAction('FYI: Merge cells by Alt+Click', parent)
+    parent.mergecell.setEnabled(False)
+    edit_menu.addAction(parent.mergecell)
+
+def modelmenu(parent):
+    main_menu = parent.menuBar()
+    io._init_model_list(parent)
+    model_menu = main_menu.addMenu("&Models")
+    parent.addmodel = QAction('Add custom torch model to GUI', parent)
+    #parent.addmodel.setShortcut("Ctrl+A")
+    parent.addmodel.triggered.connect(parent.add_model)
+    parent.addmodel.setEnabled(True)
+    model_menu.addAction(parent.addmodel)
+
+    parent.removemodel = QAction('Remove selected custom model from GUI', parent)
+    #parent.removemodel.setShortcut("Ctrl+R")
+    parent.removemodel.triggered.connect(parent.remove_model)
+    parent.removemodel.setEnabled(True)
+    model_menu.addAction(parent.removemodel)
+
+    parent.newmodel = QAction('&Train new model with image+masks in folder', parent)
+    parent.newmodel.setShortcut("Ctrl+T")
+    parent.newmodel.triggered.connect(parent.new_model)
+    parent.newmodel.setEnabled(False)
+    model_menu.addAction(parent.newmodel)
 
 def helpmenu(parent):
     main_menu = parent.menuBar()

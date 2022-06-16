@@ -1,19 +1,150 @@
 from PyQt5 import QtGui, QtCore, QtWidgets
 from PyQt5.QtGui import QPainter, QPixmap
-from PyQt5.QtWidgets import QApplication, QRadioButton, QWidget, QDialog, QButtonGroup, QSlider, QStyle, QStyleOptionSlider, QGridLayout, QPushButton, QLabel
+from PyQt5.QtWidgets import QApplication, QRadioButton, QWidget, QDialog, QButtonGroup, QSlider, QStyle, QStyleOptionSlider, QGridLayout, QPushButton, QLabel, QLineEdit, QDialogButtonBox, QComboBox, QCheckBox
 import pyqtgraph as pg
 from pyqtgraph import functions as fn
 from pyqtgraph import Point
 import numpy as np
-import pathlib
+import pathlib, os
 
-def make_quadrants(parent):
+def create_channel_choose():
+    # choose channel
+    ChannelChoose = [QComboBox(), QComboBox()]
+    ChannelLabels = []
+    ChannelChoose[0].addItems(['gray','red','green','blue'])
+    ChannelChoose[1].addItems(['none','red','green','blue'])
+    cstr = ['chan to segment:', 'chan2 (optional): ']
+    for i in range(2):
+        ChannelLabels.append(QLabel(cstr[i]))
+        if i==0:
+            ChannelLabels[i].setToolTip('this is the channel in which the cytoplasm or nuclei exist that you want to segment')
+            ChannelChoose[i].setToolTip('this is the channel in which the cytoplasm or nuclei exist that you want to segment')
+        else:
+            ChannelLabels[i].setToolTip('if <em>cytoplasm</em> model is chosen, and you also have a nuclear channel, then choose the nuclear channel for this option')
+            ChannelChoose[i].setToolTip('if <em>cytoplasm</em> model is chosen, and you also have a nuclear channel, then choose the nuclear channel for this option')
+        
+    return ChannelChoose, ChannelLabels
+
+class ModelButton(QPushButton):
+    def __init__(self, parent, model_name, text):
+        super().__init__()
+        self.setEnabled(False)
+        self.setStyleSheet(parent.styleInactive)
+        self.setText(text)
+        self.setFont(parent.smallfont)
+        self.clicked.connect(lambda: self.press(parent))
+        self.model_name = model_name
+        
+    def press(self, parent):
+        parent.compute_model(self.model_name)
+
+class TrainWindow(QDialog):
+    def __init__(self, parent, model_strings):
+        super().__init__(parent)
+        self.setGeometry(100,100,600,300)
+        self.setWindowTitle('train settings')
+        self.win = QWidget(self)
+        self.l0 = QGridLayout()
+        self.win.setLayout(self.l0)
+
+        yoff = 0
+        qlabel = QLabel('train model w/ images + _seg.npy in current folder >>')
+        qlabel.setFont(QtGui.QFont("Arial", 10, QtGui.QFont.Bold))
+        
+        qlabel.setAlignment(QtCore.Qt.AlignVCenter)
+        self.l0.addWidget(qlabel, yoff,0,1,2)
+
+        # choose initial model
+        yoff+=1
+        self.ModelChoose = QComboBox()
+        self.ModelChoose.addItems(model_strings)
+        self.ModelChoose.addItems(['scratch']) 
+        self.ModelChoose.setFixedWidth(150)
+        self.ModelChoose.setCurrentIndex(parent.training_params['model_index'])
+        self.l0.addWidget(self.ModelChoose, yoff, 1,1,1)
+        qlabel = QLabel('initial model: ')
+        qlabel.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.l0.addWidget(qlabel, yoff,0,1,1)
+
+        # choose channels
+        self.ChannelChoose, self.ChannelLabels = create_channel_choose()
+        for i in range(2):
+            yoff+=1
+            self.ChannelChoose[i].setFixedWidth(150)
+            self.ChannelChoose[i].setCurrentIndex(parent.ChannelChoose[i].currentIndex())
+            self.l0.addWidget(self.ChannelLabels[i], yoff, 0,1,1)
+            self.l0.addWidget(self.ChannelChoose[i], yoff, 1,1,1)
+
+        # choose parameters        
+        labels = ['learning_rate', 'weight_decay', 'n_epochs', 'model_name']
+        self.edits = []
+        yoff += 1
+        for i, label in enumerate(labels):
+            qlabel = QLabel(label)
+            qlabel.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            self.l0.addWidget(qlabel, i+yoff,0,1,1)
+            self.edits.append(QLineEdit())
+            self.edits[-1].setText(str(parent.training_params[label]))
+            self.l0.addWidget(self.edits[-1], i+yoff, 1,1,1)
+
+        yoff+=len(labels)
+
+        yoff+=1
+        qlabel = QLabel('(to remove files, click cancel then remove from folder and reopen train window)')
+        self.l0.addWidget(qlabel, yoff,0,1,4)
+
+        # click button
+        yoff+=1
+        QBtn = QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        self.buttonBox = QDialogButtonBox(QBtn)
+        self.buttonBox.accepted.connect(lambda: self.accept(parent))
+        self.buttonBox.rejected.connect(self.reject)
+        self.l0.addWidget(self.buttonBox, yoff, 0, 1,4)
+
+        
+        # list files in folder
+        qlabel = QLabel('filenames')
+        qlabel.setFont(QtGui.QFont("Arial", 8, QtGui.QFont.Bold))
+        self.l0.addWidget(qlabel, 0,4,1,1)
+        qlabel = QLabel('# of masks')
+        qlabel.setFont(QtGui.QFont("Arial", 8, QtGui.QFont.Bold))
+        self.l0.addWidget(qlabel, 0,5,1,1)
+    
+        for i in range(10):
+            if i > len(parent.train_files) - 1:
+                break
+            elif i==9 and len(parent.train_files) > 10:
+                label = '...'
+                nmasks = '...'
+            else:
+                label = os.path.split(parent.train_files[i])[-1]
+                nmasks = str(parent.train_labels[i].max())
+            qlabel = QLabel(label)
+            self.l0.addWidget(qlabel, i+1,4,1,1)
+            qlabel = QLabel(nmasks)
+            qlabel.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            self.l0.addWidget(qlabel, i+1, 5,1,1)
+
+    def accept(self, parent):
+        # set channels
+        for i in range(2):
+            parent.ChannelChoose[i].setCurrentIndex(self.ChannelChoose[i].currentIndex())
+        # set training params
+        parent.training_params = {'model_index': self.ModelChoose.currentIndex(),
+                                 'learning_rate': float(self.edits[0].text()), 
+                                 'weight_decay': float(self.edits[1].text()), 
+                                 'n_epochs':  int(self.edits[2].text()),
+                                 'model_name': self.edits[3].text()
+                                 }
+        self.done(1)
+        
+def make_quadrants(parent, yp):
     """ make quadrant buttons """
     parent.quadbtns = QButtonGroup(parent)
     for b in range(9):
         btn = QuadButton(b, ' '+str(b+1), parent)
         parent.quadbtns.addButton(btn, b)
-        parent.l0.addWidget(btn, 0 + parent.quadbtns.button(b).ypos, 29 + parent.quadbtns.button(b).xpos, 1, 1)
+        parent.l0.addWidget(btn, yp + parent.quadbtns.button(b).ypos, 5+parent.quadbtns.button(b).xpos, 1, 1)
         btn.setEnabled(True)
         b += 1
     parent.quadbtns.setExclusive(True)
@@ -271,7 +402,7 @@ class RGBRadioButtons(QButtonGroup):
                 button.setChecked(True)
             self.addButton(button, b)
             button.toggled.connect(lambda: self.btnpress(parent))
-            self.parent.l0.addWidget(button, row+b,col,1,1)
+            self.parent.l0.addWidget(button, row+b,col,1,3)
         self.setExclusive(True)
         #self.buttons.
 
@@ -409,10 +540,6 @@ class ImageDraw(pg.ImageItem):
                                 self.parent.select_cell(idx)
                         elif self.parent.masksOn:
                             self.parent.unselect_cell()
-                    else:
-                        ev.ignore()
-                        return
-
 
     def mouseDragEvent(self, ev):
         ev.ignore()
@@ -559,7 +686,7 @@ class RangeSlider(QSlider):
         self.hover_control = QStyle.SC_None
         self.click_offset = 0
 
-        self.setOrientation(QtCore.Qt.Vertical)
+        self.setOrientation(QtCore.Qt.Horizontal)
         self.setTickPosition(QSlider.TicksRight)
         self.setStyleSheet(\
                 "QSlider::handle:horizontal {\

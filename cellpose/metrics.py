@@ -104,14 +104,17 @@ def average_precision(masks_true, masks_pred, threshold=[0.5, 0.75, 0.9]):
         not_list = True
     if not isinstance(threshold, list) and not isinstance(threshold, np.ndarray):
         threshold = [threshold]
+    
+    if len(masks_true) != len(masks_pred):
+        raise ValueError('metrics.average_precision requires len(masks_true)==len(masks_pred)')
+
     ap  = np.zeros((len(masks_true), len(threshold)), np.float32)
     tp  = np.zeros((len(masks_true), len(threshold)), np.float32)
     fp  = np.zeros((len(masks_true), len(threshold)), np.float32)
     fn  = np.zeros((len(masks_true), len(threshold)), np.float32)
     n_true = np.array(list(map(np.max, masks_true)))
     n_pred = np.array(list(map(np.max, masks_pred)))
-#     if len(n_pred) < 1:
-#         n_pred = [0]
+    
     for n in range(len(masks_true)):
         #_,mt = np.reshape(np.unique(masks_true[n], return_index=True), masks_pred[n].shape)
         if n_pred[n] > 0:
@@ -120,7 +123,7 @@ def average_precision(masks_true, masks_pred, threshold=[0.5, 0.75, 0.9]):
                 tp[n,k] = _true_positive(iou, th)
         fp[n] = n_pred[n] - tp[n]
         fn[n] = n_true[n] - tp[n]
-        ap[n] = tp[n] / (tp[n] + fp[n] + fn[n]) # this is the jaccard index, not precision, right? 
+        ap[n] = tp[n] / (tp[n] + fp[n] + fn[n])  
         
     if not_list:
         ap, tp, fp, fn = ap[0], tp[0], fp[0], fn[0]
@@ -242,7 +245,7 @@ def _true_positive(iou, th):
     tp = match_ok.sum()
     return tp
 
-def flow_error(maski, dP_net, use_gpu=False, device=None, omni=True):
+def flow_error(maski, dP_net, use_gpu=False, device=None):
     """ error in flows from predicted masks vs flows predicted by network run on image
 
     This function serves to benchmark the quality of masks, it works as follows
@@ -275,12 +278,8 @@ def flow_error(maski, dP_net, use_gpu=False, device=None, omni=True):
         print('ERROR: net flow is not same size as predicted masks')
         return
 
-    # ensure unique masks
-    maski = np.reshape(np.unique(maski.astype(np.float32), return_inverse=True)[1], maski.shape)
-
     # flows predicted from estimated masks
-    idx = -1 # flows are the last thing returned now
-    dP_masks = dynamics.masks_to_flows(maski, use_gpu=use_gpu, device=device, omni=omni)[idx] 
+    dP_masks = dynamics.masks_to_flows(maski, use_gpu=use_gpu, device=device)
     # difference between predicted flows vs mask flows
     flow_errors=np.zeros(maski.max())
     for i in range(dP_masks.shape[0]):

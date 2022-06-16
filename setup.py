@@ -4,12 +4,12 @@ from setuptools import setup
 install_deps = ['numpy>=1.20.0', 'scipy', 'natsort',
                 'tifffile', 'tqdm', 'numba', 
                 'torch>=1.6',
-                'torch_optimizer',
                 'opencv-python-headless',
-                'edt','fastremap','torch_optimizer']
+                'fastremap'
+                ]
 
 gui_deps = [
-        'pyqtgraph==0.11.0rc0', 
+        'pyqtgraph>=0.11.0rc0', 
         'pyqt5', 
         'pyqt5.sip',
         'google-cloud-storage'
@@ -20,11 +20,6 @@ docs_deps = [
         'sphinxcontrib-apidoc',
         'sphinx_rtd_theme',
       ]
-
-omni_deps = [
-        'scikit-image', 
-        'scikit-learn'
-        ]
 
 distributed_deps = [
         'dask',
@@ -65,11 +60,10 @@ setup(
       'pytest'
     ],
     extras_require = {
-      'omni': omni_deps,
       'docs': docs_deps,
       'gui': gui_deps,
-      'all': gui_deps + omni_deps,
       'distributed': distributed_deps,
+      'all': gui_deps + distributed_deps,
     },
     include_package_data=True,
     classifiers=(
