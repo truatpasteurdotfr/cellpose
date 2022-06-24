@@ -20,6 +20,8 @@ RUN conda update --yes conda && \
 RUN eval "$(/opt/conda/bin/conda shell.bash hook)" && \
     conda create --name cellpose python=3.8 && \
     conda activate cellpose && \
+    python -m pip install cellpose[all] && \
+    python -m pip uninstall torch  && \
     conda install pytorch cudatoolkit=11.3 -c pytorch && \
     python -m pip install cellpose[all]
 
