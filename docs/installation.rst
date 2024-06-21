@@ -37,7 +37,23 @@ by Peter Sobolewski. From the command line you can choose the Mac device with
 ::
 
    python -m cellpose --dir path --gpu_device mps --use_gpu
-   
+
+AMD GPU ROCm installation
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+As an alternative to the CUDA acceleration for NVIDIA GPUs, you can use the ROCm acceleration for AMD GPUs.
+This is not yet supported on Windows, but is supported on Linux. Installation instructions are `available here
+<https://docs.amd.com/bundle/ROCm-Installation-Guide-v5.5/page/Introduction_to_ROCm_Installation_Guide_for_Linux.html>`_.
+Just like the NVIDIA CUDA installation, you will need to install the ROCm drivers first and then install Cellpose.
+Be warned that the ROCm project is significantly less mature than CUDA, and you may run into issues.
+
+.. warning::
+   The ROCm acceleration is not yet supported on Windows, and is only supported on Linux.
+   If you are on Windows, you will need to use CUDA acceleration.
+
+.. warning::
+   ROCm is significantly less mature than the CUDA acceleration, and you may run into issues.
+
 
 Common issues
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -91,17 +107,19 @@ Dependencies
 ~~~~~~~~~~~~~~~~~~~~~~
 
 cellpose relies on the following excellent packages (which are
-automatically installed with conda/pip if missing):
+automatically installed with pip if missing):
 
 -  `pytorch`_
 -  `pyqtgraph`_
--  `PyQt5`_
+-  `PyQt5`_ or pyside or PyQt6
 -  `numpy`_ (>=1.16.0)
 -  `numba`_
 -  `scipy`_
--  `scikit-image`_
+-  `tifffile`_
 -  `natsort`_
--  `matplotlib`_
+-  `fastremap`_
+-  `roifile`_
+-  `superqt`_
 
 .. _Anaconda: https://www.anaconda.com/download/
 .. _environment.yml: https://github.com/MouseLand/cellpose/blob/master/environment.yml?raw=true
@@ -113,6 +131,8 @@ automatically installed with conda/pip if missing):
 .. _numpy: http://www.numpy.org/
 .. _numba: http://numba.pydata.org/numba-doc/latest/user/5minguide.html
 .. _scipy: https://www.scipy.org/
-.. _scikit-image: https://scikit-image.org/
+.. _tifffile: https://pypi.org/project/tifffile/
 .. _natsort: https://natsort.readthedocs.io/en/master/
-.. _matplotlib: https://matplotlib.org/
+.. _fastremap: https://github.com/seung-lab/fastremap
+.. _roifile: https://github.com/cgohlke/roifile
+.. _superqt: https://github.com/pyapp-kit/superqt
