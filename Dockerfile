@@ -18,10 +18,10 @@ RUN conda update --yes conda && \
     conda update -n base -c defaults conda -y && \
     conda update --all -y 
 RUN eval "$(/opt/conda/bin/conda shell.bash hook)" && \
-    conda create --name cellpose python=3.8 && \
+    conda create --name cellpose python=3.10 && \
     conda activate cellpose && \
     python -m pip install cellpose[all] && \
     python -m pip uninstall torch -y  && \
-    conda install pytorch pytorch-cuda=11.7 -c pytorch -c nvidia && \
+    conda install pytorch pytorch-cuda=12.4 -c pytorch -c nvidia && \
     python -m pip install cellpose[all]
 
