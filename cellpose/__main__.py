@@ -148,23 +148,35 @@ def main():
                 % (nimg, cstr0[channels[0]], cstr1[channels[1]]))
 
             # handle built-in model exceptions
-            if builtin_size and restore_type is None:
+            if builtin_size and restore_type is None and not args.pretrained_model_ortho:
                 model = models.Cellpose(gpu=gpu, device=device, model_type=model_type,
                                         backbone=backbone)
             else:
                 builtin_size = False
                 if args.all_channels:
                     channels = None
+                    img = io.imread(image_names[0])
+                    if img.ndim == 3:
+                        nchan = min(img.shape)
+                    elif img.ndim == 2:
+                        nchan = 1
+                    channels = None
+                else:
+                    nchan = 2
+
                 pretrained_model = None if model_type is not None else pretrained_model
                 if restore_type is None:
+                    pretrained_model_ortho = None if args.pretrained_model_ortho is None else args.pretrained_model_ortho
                     model = models.CellposeModel(gpu=gpu, device=device,
                                                  pretrained_model=pretrained_model,
                                                  model_type=model_type,
-                                                 backbone=backbone)
+                                                 nchan=nchan,
+                                                 backbone=backbone,
+                                                 pretrained_model_ortho=pretrained_model_ortho)
                 else:
                     model = denoise.CellposeDenoiseModel(
                         gpu=gpu, device=device, pretrained_model=pretrained_model,
-                        model_type=model_type, restore_type=restore_type,
+                        model_type=model_type, restore_type=restore_type, nchan=nchan,
                         chan2_restore=args.chan2_restore)
 
             # handle diameters
@@ -199,7 +211,8 @@ def main():
                     invert=args.invert, batch_size=args.batch_size,
                     interp=(not args.no_interp), normalize=(not args.no_norm),
                     channel_axis=args.channel_axis, z_axis=args.z_axis,
-                    anisotropy=args.anisotropy, niter=args.niter)
+                    anisotropy=args.anisotropy, niter=args.niter,
+                    dP_smooth=args.dP_smooth)
                 masks, flows = out[:2]
                 if len(out) > 3 and restore_type is None:
                     diams = out[-1]
@@ -230,7 +243,6 @@ def main():
                     io.save_rois(masks, image_name)
             logger.info(">>>> completed in %0.3f sec" % (time.time() - tic))
         else:
-
             test_dir = None if len(args.test_dir) == 0 else args.test_dir
             images, labels, image_names, train_probs = None, None, None, None
             test_images, test_labels, image_names_test, test_probs = None, None, None, None
@@ -299,7 +311,7 @@ def main():
                     nimg_per_epoch=args.nimg_per_epoch,
                     nimg_test_per_epoch=args.nimg_test_per_epoch,
                     save_path=os.path.realpath(args.dir), save_every=args.save_every,
-                    model_name=args.model_name_out)
+                    model_name=args.model_name_out)[0]
                 model.pretrained_model = cpmodel_path
                 logger.info(">>>> model trained and saved to %s" % cpmodel_path)
 

@@ -85,9 +85,9 @@ If you have an older `cellpose` environment you can remove it with `conda env re
 
 If you are using a GPU, make sure its drivers and the cuda libraries are correctly installed.
 
-1. Install an [Anaconda](https://www.anaconda.com/products/distribution) distribution of Python. Note you might need to use an anaconda prompt if you did not add anaconda to the path.
+1. Install a [miniforge](https://github.com/conda-forge/miniforge) distribution of Python. Note you might need to use an anaconda prompt if you did not add anaconda to the path.
 2. Open an anaconda prompt / command prompt which has `conda` for **python 3** in the path
-3. Create a new environment with `conda create --name cellpose python=3.8`. We recommend python 3.8, but python 3.9 and 3.10 will likely work as well.
+3. Create a new environment with `conda create --name cellpose python=3.10`. We recommend python 3.10, but python 3.9 and 3.11 will also work.
 4. To activate this new environment, run `conda activate cellpose`
 5. (option 1) To install cellpose with the GUI, run `python -m pip install cellpose[gui]`.  If you're on a zsh server, you may need to use ' ': `python -m pip install 'cellpose[gui]'`.
 6. (option 2) To install cellpose without the GUI, run `python -m pip install cellpose`. 
@@ -126,11 +126,11 @@ If you are using a GPU, make sure its drivers and the cuda libraries are correct
 
 ### GPU version (CUDA) on Windows or Linux
 
-If you plan on running many images, you may want to install a GPU version of *torch* (if it isn't already installed).
+If you plan on running many images, you may want to install a GPU version of *torch*. To use your NVIDIA GPU with python, you will need to make sure the NVIDIA driver for your GPU is installed, check out this [website](https://www.nvidia.com/Download/index.aspx?lang=en-us) to download it. You can also install the CUDA toolkit, or use the pytorch cudatoolkit (installed below with conda). If you have trouble with the below install, we recommend installing the CUDA toolkit yourself, choosing one of the 11.x releases [here](https://developer.nvidia.com/cuda-toolkit-archive).
 
-To use your NVIDIA GPU with python, you will first need to install the NVIDIA driver for your GPU, check out this [website](https://www.nvidia.com/Download/index.aspx?lang=en-us) to download it. You can also install the CUDA toolkit, or use the pytorch cudatoolkit (installed below with conda). If you have trouble with the below install, we recommend installing the CUDA toolkit yourself, choosing one of the 11.x releases [here](https://developer.nvidia.com/cuda-toolkit-archive).
+With the latest versions of pytorch, as long as the NVIDIA drivers are installed, the GPU version is installed by default with pip. You can check if the GPU support is working by opening the GUI. If the GPU is working then the `GPU` box will be checked and the `CUDA` version will be displayed in the command line. 
 
-Next we need to remove the CPU version of torch:
+If it's not working, we will need to remove the CPU version of torch:
 ~~~
 pip uninstall torch
 ~~~
@@ -185,7 +185,7 @@ python -m cellpose
 
 The first time cellpose runs it downloads the latest available trained model weights from the website.
 
-You can now **drag and drop** any images (*.tif, *.png, *.jpg, *.gif) into the GUI and run Cellpose, and/or manually segment them. When the GUI is processing, you will see the progress bar fill up and during this time you cannot click on anything in the GUI. For more information about what the GUI is doing you can look at the terminal/prompt you opened the GUI with. For example data, see [website](http://www.cellpose.org) or this [zip file](https://www.cellpose.org/static/images/demo_images.zip). For best accuracy and runtime performance, resize images so cells are less than 100 pixels across. 
+You can now **drag and drop** any images (*.tif, *.png, *.jpg, *.gif) into the GUI and run Cellpose, and/or manually segment them. When the GUI is processing, you will see the progress bar fill up and during this time you cannot click on anything in the GUI. For more information about what the GUI is doing you can look at the terminal/prompt you opened the GUI with. For example data, see [website](https://www.cellpose.org) or this [zip file](https://www.cellpose.org/static/images/demo_images.zip). For best accuracy and runtime performance, resize images so cells are less than 100 pixels across. 
 
 For 3D data, with multi-Z, please use the 3D version of the GUI with:
 ~~~~
@@ -195,7 +195,7 @@ python -m cellpose --Zstack
 
 ## Step-by-step demo
 
-1. Download this [folder](http://cellpose.org/static/images/demo_images.zip) of images and unzip it. These are a subset of the test images from the paper.
+1. Download this [zip file](https://www.cellpose.org/static/images/demo_images.zip) of images and unzip it. These are a subset of the test images from the paper.
 2. Start the GUI with `python -m cellpose`.
 3. Drag an image from the folder into the GUI.
 4. Set the model (in demo all are `cyto`) and the channel you want to segment (in demo all are `green`). Optionally set the second channel if you are segmenting `cyto` and have an available nucleus channel.
@@ -241,17 +241,3 @@ Check out [Omnipose](https://github.com/kevinjohncutler/omnipose), an extension 
 Pytorch is now the default deep neural network software for cellpose. Mxnet will still be supported. To install mxnet (CPU), run `pip install mxnet-mkl`. To use mxnet in a notebook, declare `torch=False` when creating a model, e.g. `model = models.Cellpose(torch=False)`. To use mxnet on the command line, add the flag `--mxnet`, e.g. `python -m cellpose --dir ~/images/ --mxnet`. The pytorch implementation is 20% faster than the mxnet implementation when running on the GPU and 20% slower when running on the CPU. 
 
 Dynamics are computed using bilinear interpolation by default instead of nearest neighbor interpolation. Set `interp=False` in `model.eval` to turn off. The bilinear interpolation will be slightly slower on the CPU, but it is faster than nearest neighbor if using torch and the GPU is enabled.
-
-
-### Timing (v0.6)
-
-You can check if cellpose is running the MKL version (if you are using the CPU not the GPU) by adding the flag `--check_mkl`. If you are not using MKL cellpose will be much slower. Here are Cellpose run times divided into the time it takes to run the deep neural network (DNN) and the time for postprocessing (gradient tracking, segmentation, quality control etc.). The DNN runtime is shown using either a GPU (Nvidia GTX 1080Ti) or a CPU (Intel 10-core 7900X), with or without network ensembling (4net vs 1net). The postprocessing runtime is similar regardless of ensembling or CPU/GPU version. Runtime is shown for different image sizes, all with a cell diameter of 30 pixels (the average from our training set).
-
-|   | 256 pix | 512 pix | 1024 pix |
-|----|-------|------|----------|
-| DNN (1net, GPU) | 0.054 s | 0.12 s | 0.31 s  |
-| DNN (1net, CPU) | 0.30 s | 0.65 s | 2.4 s  |
-| DNN (4net, GPU) | 0.23 s | 0.41 s | 1.3 s |
-| DNN (4net, CPU) | 1.3 s | 2.5 s | 9.1 s  |
-|  | |  |  |
-| Postprocessing (CPU) | 0.32 s | 1.2 s | 6.1 s  |
