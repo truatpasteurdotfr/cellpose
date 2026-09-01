@@ -1,19 +1,19 @@
 """
-Copyright © 2023 Howard Hughes Medical Institute, Authored by Carsen Stringer and Marius Pachitariu.
+Copyright © 2025 Howard Hughes Medical Institute, Authored by Carsen Stringer , Michael Rariden and Marius Pachitariu.
 """
 import logging
 import os, tempfile, shutil, io
 from tqdm import tqdm, trange
 from urllib.request import urlopen
 import cv2
-from scipy.ndimage import find_objects, gaussian_filter, generate_binary_structure, label, maximum_filter1d, binary_fill_holes
+from scipy.ndimage import find_objects, gaussian_filter, generate_binary_structure, label
 from scipy.spatial import ConvexHull
 import numpy as np
 import colorsys
 import fastremap
+import fill_voids
 from multiprocessing import Pool, cpu_count
-
-from . import metrics
+from cellpose import metrics
 
 try:
     from skimage.morphology import remove_small_holes
@@ -213,12 +213,12 @@ def masks_to_outlines(masks):
         return outlines
 
 
-def outlines_list(masks, multiprocessing_threshold=1000, multiprocessing=None):
+def outlines_list(masks, multiprocessing_threshold=50000, multiprocessing=None):
     """Get outlines of masks as a list to loop over for plotting.
 
     Args:
         masks (ndarray): Array of masks.
-        multiprocessing_threshold (int, optional): Threshold for enabling multiprocessing. Defaults to 1000.
+        multiprocessing_threshold (int, optional): Threshold for enabling multiprocessing. Defaults to 50000.
         multiprocessing (bool, optional): Flag to enable multiprocessing. Defaults to None.
 
     Returns:
@@ -529,6 +529,8 @@ def stitch3D(masks, stitch_threshold=0.25):
     mmax = masks[0].max()
     empty = 0
     for i in trange(len(masks) - 1):
+        if masks.dtype == "uint16" and int(mmax) > max(0, 2**16 - 5 - masks[i + 1].max()):
+            masks = masks.astype("uint32")
         iou = metrics._intersection_over_union(masks[i + 1], masks[i])[1:, 1:]
         if not iou.size and empty == 0:
             masks[i + 1] = masks[i + 1]
@@ -561,7 +563,7 @@ def diameters(masks):
     masks (ndarray): masks (0=no cells, 1=first cell, 2=second cell,...)
 
     Returns:
-    tuple: A tuple containing the median diameter and an array of diameters for each object.
+        tuple: A tuple containing the median diameter and an array of diameters for each object.
 
     Examples:
     >>> masks = np.array([[0, 1, 1], [1, 0, 0], [1, 1, 0]])
@@ -586,10 +588,7 @@ def radius_distribution(masks, bins):
         bins (int): Number of bins for the histogram.
 
     Returns:
-        tuple: A tuple containing:
-            - nb (ndarray): Normalized histogram of radii.
-            - md (float): Median radius.
-            - radii (ndarray): Array of radii.
+        A tuple containing a normalized histogram of radii, median radius, array of radii.
 
     """
     unique, counts = np.unique(masks, return_counts=True)
@@ -622,7 +621,7 @@ def size_distribution(masks):
 def fill_holes_and_remove_small_masks(masks, min_size=15):
     """ Fills holes in masks (2D/3D) and discards masks smaller than min_size.
 
-    This function fills holes in each mask using scipy.ndimage.morphology.binary_fill_holes.
+    This function fills holes in each mask using fill_voids.fill.
     It also removes masks that are smaller than the specified min_size.
 
     Parameters:
@@ -634,29 +633,41 @@ def fill_holes_and_remove_small_masks(masks, min_size=15):
         Set to -1 to turn off this functionality. Default is 15.
 
     Returns:
-    ndarray: Int, 2D or 3D array of masks with holes filled and small masks removed.
-        0 represents no mask, while positive integers represent mask labels.
-        The size is [Ly x Lx] or [Lz x Ly x Lx].
+        ndarray: Int, 2D or 3D array of masks with holes filled and small masks removed.
+            0 represents no mask, while positive integers represent mask labels.
+            The size is [Ly x Lx] or [Lz x Ly x Lx].
     """
 
     if masks.ndim > 3 or masks.ndim < 2:
         raise ValueError("masks_to_outlines takes 2D or 3D array, not %dD array" %
                          masks.ndim)
 
+    # Filter small masks
+    if min_size > 0:
+        uniq, counts = fastremap.unique(masks, return_counts=True)
+        # uniq[0] is background (0), so uniq[1:] are the actual mask labels
+        # counts[1:] are the corresponding counts
+        small_mask_indices = np.nonzero(counts[1:] < min_size)[0]
+        # Get the actual label values to remove (not indices)
+        labels_to_remove = uniq[1:][small_mask_indices]
+        masks = fastremap.mask(masks, labels_to_remove)
+        fastremap.renumber(masks, in_place=True)
+
     slices = find_objects(masks)
     j = 0
     for i, slc in enumerate(slices):
         if slc is not None:
             msk = masks[slc] == (i + 1)
-            npix = msk.sum()
-            if min_size > 0 and npix < min_size:
-                masks[slc][msk] = 0
-            elif npix > 0:
-                if msk.ndim == 3:
-                    for k in range(msk.shape[0]):
-                        msk[k] = binary_fill_holes(msk[k])
-                else:
-                    msk = binary_fill_holes(msk)
-                masks[slc][msk] = (j + 1)
-                j += 1
+            msk = fill_voids.fill(msk)
+            masks[slc][msk] = (j + 1)
+            j += 1
+
+    if min_size > 0:
+        uniq, counts = fastremap.unique(masks, return_counts=True)
+        small_mask_indices = np.nonzero(counts[1:] < min_size)[0]
+        labels_to_remove = uniq[1:][small_mask_indices]
+        masks = fastremap.mask(masks, labels_to_remove)
+        fastremap.renumber(masks, in_place=True)
+    
+
     return masks

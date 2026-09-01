@@ -1,16 +1,12 @@
 """
-Copyright © 2023 Howard Hughes Medical Institute, Authored by Carsen Stringer and Marius Pachitariu.
+Copyright © 2025 Howard Hughes Medical Institute, Authored by Carsen Stringer , Michael Rariden and Marius Pachitariu.
 """
-
-import os, datetime, gc, warnings, glob, shutil, copy
-from natsort import natsorted
+import os, gc
 import numpy as np
 import cv2
-import tifffile
-import logging
 import fastremap
 
-from ..io import imread, imsave, outlines_to_text, add_model, remove_model, save_rois
+from ..io import imread, imread_2D, imread_3D, imsave, outlines_to_text, add_model, remove_model, save_rois
 from ..models import normalize_default, MODEL_DIR, MODEL_LIST_PATH, get_user_models
 from ..utils import masks_to_outlines, outlines_list
 
@@ -45,23 +41,22 @@ def _add_model(parent, filename=None, load_model=True):
 
     for ind, model_string in enumerate(parent.model_strings[:-1]):
         if model_string == fname:
-            _remove_model(parent, ind=ind + 1, verbose=False)
+            _remove_model(parent, ind=ind + 1)
 
     parent.ModelChooseC.setCurrentIndex(len(parent.model_strings))
     if load_model:
         parent.model_choose(custom=True)
 
 
-def _remove_model(parent, ind=None, verbose=True):
+def _remove_model(parent, ind=None):
     if ind is None:
         ind = parent.ModelChooseC.currentIndex()
     if ind > 0:
-        ind -= 1
-        parent.ModelChooseC.removeItem(ind + 1)
-        del parent.model_strings[ind]
-        # remove model from txt path
         modelstr = parent.ModelChooseC.currentText()
+        parent.ModelChooseC.removeItem(ind)
+        # remove model from txt path
         remove_model(modelstr)
+        parent.model_strings.remove(modelstr)
         if len(parent.model_strings) > 0:
             parent.ModelChooseC.setCurrentIndex(len(parent.model_strings))
         else:
@@ -103,16 +98,33 @@ def _get_train_set(image_names):
 
 
 def _load_image(parent, filename=None, load_seg=True, load_3D=False):
-    """ load image with filename; if None, open QFileDialog """
+    """ load image with filename; if None, open QFileDialog
+    if image is grey change view to default to grey scale 
+    """
+
+    if parent.load_3D:
+        load_3D = True
+
     if filename is None:
         name = QFileDialog.getOpenFileName(parent, "Load image")
         filename = name[0]
+        if filename == "":
+            return
     manual_file = os.path.splitext(filename)[0] + "_seg.npy"
     load_mask = False
     if load_seg:
         if os.path.isfile(manual_file) and not parent.autoloadMasks.isChecked():
-            _load_seg(parent, manual_file, image=imread(filename), image_file=filename,
-                      load_3D=load_3D)
+            if filename is not None:
+                image = (imread_2D(filename) if not load_3D else 
+                         imread_3D(filename))
+            else:
+                image = None
+            _load_seg(parent, manual_file, image=image, image_file=filename,
+                        load_3D=load_3D)
+            if len(np.unique(image[..., 1:])) == 1:
+                parent.color = 'gray' # updates the plot automatically
+            else:
+                parent.update_plot()
             return
         elif parent.autoloadMasks.isChecked():
             mask_file = os.path.splitext(filename)[0] + "_masks" + os.path.splitext(
@@ -122,11 +134,15 @@ def _load_image(parent, filename=None, load_seg=True, load_3D=False):
             load_mask = True if os.path.isfile(mask_file) else False
     try:
         print(f"GUI_INFO: loading image: {filename}")
-        image = imread(filename)
+        if not load_3D:
+            image = imread_2D(filename)
+        else:
+            image = imread_3D(filename)
         parent.loaded = True
     except Exception as e:
         print("ERROR: images not compatible")
         print(f"ERROR: {e}")
+        return
 
     if parent.loaded:
         parent.reset()
@@ -138,60 +154,22 @@ def _load_image(parent, filename=None, load_seg=True, load_3D=False):
         if load_mask:
             _load_masks(parent, filename=mask_file)
 
+    # check if gray and adjust viewer:
+    if len(np.unique(image[..., 1:])) == 1:
+        parent.color = 'gray' # triggers update_plot
+    else:
+        parent.update_plot()
 
 def _initialize_images(parent, image, load_3D=False):
-    """ format image for GUI """
+    """ format image for GUI
+
+    assumes image is Z x W x H x C
+
+    """
     load_3D = parent.load_3D if load_3D is False else load_3D
-    parent.nchan = 3
-    if image.ndim > 4:
-        image = image.squeeze()
-        if image.ndim > 4:
-            raise ValueError("cannot load 4D stack, reduce dimensions")
-    elif image.ndim == 1:
-        raise ValueError("cannot load 1D stack, increase dimensions")
-
-    if image.ndim == 4:
-        if not load_3D:
-            raise ValueError(
-                "cannot load 3D stack, run 'python -m cellpose --Zstack' for 3D GUI")
-        else:
-            # make tiff Z x channels x W x H
-            if image.shape[0] < 4:
-                # tiff is channels x Z x W x H
-                image = image.transpose((1, 2, 3, 0))
-            image = np.transpose(image, (0, 2, 3, 1))
-    elif image.ndim == 3:
-        if not load_3D:
-            # assume smallest dimension is channels and put last
-            c = np.array(image.shape).argmin()
-            image = image.transpose(((c + 1) % 3, (c + 2) % 3, c))
-        elif load_3D:
-            # assume smallest dimension is Z and put first if <3x max dim
-            shape = np.array(image.shape)
-            z = shape.argmin()
-            if shape[z] < shape.max() / 3:
-                image = image.transpose((z, (z + 1) % 3, (z + 2) % 3))
-            image = image[..., np.newaxis]
-    elif image.ndim == 2:
-        if not load_3D:
-            image = image[..., np.newaxis]
-        else:
-            raise ValueError(
-                "cannot load 2D stack in 3D mode, run 'python -m cellpose' for 2D GUI")
-
-    if image.shape[-1] > 3:
-        print("WARNING: image has more than 3 channels, keeping only first 3")
-        image = image[..., :3]
-    elif image.shape[-1] == 2:
-        # fill in with blank channels to make 3 channels
-        shape = image.shape
-        image = np.concatenate(
-            (image, np.zeros((*shape[:-1], 3 - shape[-1]), dtype=np.uint8)), axis=-1)
-        parent.nchan = 2
-    elif image.shape[-1] == 1:
-        parent.nchan = 1
 
     parent.stack = image
+    parent.logger.info(f" : image shape: {image.shape}")
     if load_3D:
         parent.NZ = len(parent.stack)
         parent.scroll.setMaximum(parent.NZ - 1)
@@ -201,14 +179,18 @@ def _initialize_images(parent, image, load_3D=False):
 
     img_min = image.min()
     img_max = image.max()
-    parent.stack = parent.stack.astype(np.float32)
+    parent.stack = parent.stack.astype("float32")
     parent.stack -= img_min
     if img_max > img_min + 1e-3:
         parent.stack /= (img_max - img_min)
     parent.stack *= 255
 
+    if parent.stack.shape[-1] == 2:
+        parent.stack = np.concatenate((parent.stack, np.zeros((*parent.stack.shape[:-1], 1), dtype="float32")), axis=-1)
+    print(parent.stack.shape)
+
     if load_3D:
-        print("GUI_INFO: converted to float and normalized values to 0.0->255.0")
+        parent.logger.info(": converted to float and normalized values to 0.0->255.0")
 
     del image
     gc.collect()
@@ -216,33 +198,12 @@ def _initialize_images(parent, image, load_3D=False):
     parent.imask = 0
     parent.Ly, parent.Lx = parent.stack.shape[-3:-1]
     parent.Ly0, parent.Lx0 = parent.stack.shape[-3:-1]
+    parent.nchan = parent.stack.shape[-1]
     parent.layerz = 255 * np.ones((parent.Ly, parent.Lx, 4), "uint8")
-    if hasattr(parent, "stack_filtered"):
-        parent.Lyr, parent.Lxr = parent.stack_filtered.shape[-3:-1]
-    elif parent.restore and "upsample" in parent.restore:
-        parent.Lyr, parent.Lxr = int(parent.Ly * parent.ratio), int(parent.Lx *
-                                                                    parent.ratio)
-    else:
-        parent.Lyr, parent.Lxr = parent.Ly, parent.Lx
+    parent.Lyr, parent.Lxr = parent.stack.shape[-3:-1]
     parent.clear_all()
 
-    if not hasattr(parent, "stack_filtered") and parent.restore:
-        print("GUI_INFO: no 'img_restore' found, applying current settings")
-        parent.compute_restore()
-
-    if parent.autobtn.isChecked():
-        if parent.restore is None or parent.restore != "filter":
-            print(
-                "GUI_INFO: normalization checked: computing saturation levels (and optionally filtered image)"
-            )
-            parent.compute_saturation()
-    elif len(parent.saturation) != parent.NZ:
-        parent.saturation = []
-        for r in range(3):
-            parent.saturation.append([])
-            for n in range(parent.NZ):
-                parent.saturation[-1].append([0, 255])
-            parent.sliders[r].setValue([0, 255])
+    parent.compute_saturation()    
     parent.compute_scale()
     parent.track_changes = []
 
@@ -286,7 +247,8 @@ def _load_seg(parent, filename=None, image=None, image_file=None, load_3D=False)
         if found_image:
             try:
                 print(parent.filename)
-                image = imread(parent.filename)
+                image = (imread_2D(parent.filename) if not load_3D else 
+                         imread_3D(parent.filename))
             except:
                 parent.loaded = False
                 found_image = False
@@ -306,53 +268,10 @@ def _load_seg(parent, filename=None, image=None, image_file=None, load_3D=False)
     parent.ratio = 1.
 
     if "normalize_params" in dat:
-        parent.restore = None if "restore" not in dat else dat["restore"]
-        print(f"GUI_INFO: restore: {parent.restore}")
         parent.set_normalize_params(dat["normalize_params"])
-        parent.set_restore_button()
-
-    if "img_restore" in dat:
-        img = dat["img_restore"]
-        img_min = img.min()
-        img_max = img.max()
-        parent.stack_filtered = img.astype("float32")
-        parent.stack_filtered -= img_min
-        if img_max > img_min + 1e-3:
-            parent.stack_filtered /= (img_max - img_min)
-        parent.stack_filtered *= 255
-        if parent.stack_filtered.ndim < 4:
-            parent.stack_filtered = parent.stack_filtered[np.newaxis, ...]
-        if parent.stack_filtered.ndim < 4:
-            parent.stack_filtered = parent.stack_filtered[..., np.newaxis]
-        shape = parent.stack_filtered.shape
-        if shape[-1] == 2:
-            if "chan_choose" in dat:
-                channels = np.array(dat["chan_choose"]) - 1
-                img = np.zeros((*shape[:-1], 3), dtype="float32")
-                img[..., channels] = parent.stack_filtered
-                parent.stack_filtered = img
-            else:
-                parent.stack_filtered = np.concatenate(
-                    (parent.stack_filtered, np.zeros(
-                        (*shape[:-1], 1), dtype="float32")), axis=-1)
-        elif shape[-1] > 3:
-            parent.stack_filtered = parent.stack_filtered[..., :3]
-
-        parent.restore = dat["restore"]
-        parent.ViewDropDown.model().item(parent.ViewDropDown.count() -
-                                         1).setEnabled(True)
-        parent.view = parent.ViewDropDown.count() - 1
-        if parent.restore and "upsample" in parent.restore:
-            print(parent.stack_filtered.shape, image.shape)
-            parent.ratio = dat["ratio"]
-
-    parent.set_restore_button()
 
     _initialize_images(parent, image, load_3D=load_3D)
     print(parent.stack.shape)
-    if "chan_choose" in dat:
-        parent.ChannelChoose[0].setCurrentIndex(dat["chan_choose"][0])
-        parent.ChannelChoose[1].setCurrentIndex(dat["chan_choose"][1])
 
     if "outlines" in dat:
         if isinstance(dat["outlines"], list):
@@ -373,40 +292,38 @@ def _load_seg(parent, filename=None, image=None, image_file=None, load_3D=False)
             if dat["masks"].min() == -1:
                 dat["masks"] += 1
                 dat["outlines"] += 1
-            parent.ncells = dat["masks"].max()
+            parent.ncells.set(dat["masks"].max())
             if "colors" in dat and len(dat["colors"]) == dat["masks"].max():
                 colors = dat["colors"]
             else:
-                colors = parent.colormap[:parent.ncells, :3]
+                colors = parent.colormap[:parent.ncells.get(), :3]
 
             _masks_to_gui(parent, dat["masks"], outlines=dat["outlines"], colors=colors)
 
             parent.draw_layer()
-            if "est_diam" in dat:
-                parent.Diameter.setText("%0.1f" % dat["est_diam"])
-                parent.diameter = dat["est_diam"]
-                parent.compute_scale()
 
         if "manual_changes" in dat:
             parent.track_changes = dat["manual_changes"]
-            print("GUI_INFO: loaded in previous changes")
+            parent.logger.info("loaded in previous changes")
         if "zdraw" in dat:
             parent.zdraw = dat["zdraw"]
         else:
-            parent.zdraw = [None for n in range(parent.ncells)]
+            parent.zdraw = [None for n in range(parent.ncells.get())]
         parent.loaded = True
-        #print(f"GUI_INFO: {parent.ncells} masks found in {filename}")
     else:
         parent.clear_all()
 
-    parent.ismanual = np.zeros(parent.ncells, bool)
+    parent.ismanual = np.zeros(parent.ncells.get(), bool)
     if "ismanual" in dat:
         if len(dat["ismanual"]) == parent.ncells:
             parent.ismanual = dat["ismanual"]
 
     if "current_channel" in dat:
-        parent.color = (dat["current_channel"] + 2) % 5
-        parent.RGBDropDown.setCurrentIndex(parent.color)
+        # saved as int, loading int is built into .color property
+        color = dat['current_channel']
+        if isinstance(color, tuple):
+            color = color[0]
+        parent.color = color
 
     if "flows" in dat:
         parent.flows = dat["flows"]
@@ -432,6 +349,7 @@ def _load_seg(parent, filename=None, image=None, image_file=None, load_3D=False)
 
     parent.enable_buttons()
     parent.update_layer()
+    parent.update_plot()
     del dat
     gc.collect()
 
@@ -470,7 +388,6 @@ def _load_masks(parent, filename=None):
     del masks
     gc.collect()
     parent.update_layer()
-    parent.update_plot()
 
 
 def _masks_to_gui(parent, masks, outlines=None, colors=None):
@@ -478,7 +395,7 @@ def _masks_to_gui(parent, masks, outlines=None, colors=None):
     # get unique values
     shape = masks.shape
     if len(fastremap.unique(masks)) != masks.max() + 1:
-        print("GUI_INFO: renumbering masks")
+        parent.logger.info("renumbering masks")
         fastremap.renumber(masks, in_place=True)
         outlines = None
         masks = masks.reshape(shape)
@@ -503,7 +420,7 @@ def _masks_to_gui(parent, masks, outlines=None, colors=None):
             if parent.cellpix_orig.ndim == 2:
                 parent.cellpix_orig = parent.cellpix_orig[np.newaxis, :, :]
 
-    print(f"GUI_INFO: {masks.max()} masks found")
+    parent.logger.info(f"{masks.max()} masks found")
 
     # get outlines
     if outlines is None:  # parent.outlinesOn
@@ -517,7 +434,7 @@ def _masks_to_gui(parent, masks, outlines=None, colors=None):
                 outlines = masks_to_outlines(parent.cellpix_orig[z])
                 parent.outpix_orig[z] = outlines * parent.cellpix_orig[z]
             if z % 50 == 0 and parent.NZ > 1:
-                print("GUI_INFO: plane %d outlines processed" % z)
+                parent.logger.info("plane %d outlines processed" % z)
         if parent.restore and "upsample" in parent.restore:
             parent.outpix_resize = parent.outpix.copy()
     else:
@@ -529,7 +446,7 @@ def _masks_to_gui(parent, masks, outlines=None, colors=None):
                 outlines = masks_to_outlines(parent.cellpix_orig[z])
                 parent.outpix_orig[z] = outlines * parent.cellpix_orig[z]
                 if z % 50 == 0 and parent.NZ > 1:
-                    print("GUI_INFO: plane %d outlines processed" % z)
+                    parent.logger.info("plane %d outlines processed" % z)
 
     if parent.outpix.ndim == 2:
         parent.outpix = parent.outpix[np.newaxis, :, :]
@@ -539,16 +456,16 @@ def _masks_to_gui(parent, masks, outlines=None, colors=None):
             if parent.outpix_orig.ndim == 2:
                 parent.outpix_orig = parent.outpix_orig[np.newaxis, :, :]
 
-    parent.ncells = parent.cellpix.max()
-    colors = parent.colormap[:parent.ncells, :3] if colors is None else colors
-    print("GUI_INFO: creating cellcolors and drawing masks")
+    parent.ncells.set(parent.cellpix.max())
+    colors = parent.colormap[:parent.ncells.get(), :3] if colors is None else colors
+    parent.logger.info("creating cellcolors and drawing masks")
     parent.cellcolors = np.concatenate((np.array([[255, 255, 255]]), colors),
                                        axis=0).astype(np.uint8)
     if parent.ncells > 0:
         parent.draw_layer()
         parent.toggle_mask_ops()
-    parent.ismanual = np.zeros(parent.ncells, bool)
-    parent.zdraw = list(-1 * np.ones(parent.ncells, np.int16))
+    parent.ismanual = np.zeros(parent.ncells.get(), bool)
+    parent.zdraw = list(-1 * np.ones(parent.ncells.get(), np.int16))
 
     if hasattr(parent, "stack_filtered"):
         parent.ViewDropDown.setCurrentIndex(parent.ViewDropDown.count() - 1)
@@ -563,13 +480,13 @@ def _save_png(parent):
     base = os.path.splitext(filename)[0]
     if parent.NZ == 1:
         if parent.cellpix[0].max() > 65534:
-            print("GUI_INFO: saving 2D masks to tif (too many masks for PNG)")
+            parent.logger.info("saving 2D masks to tif (too many masks for PNG)")
             imsave(base + "_cp_masks.tif", parent.cellpix[0])
         else:
-            print("GUI_INFO: saving 2D masks to png")
+            parent.logger.info("saving 2D masks to png")
             imsave(base + "_cp_masks.png", parent.cellpix[0].astype(np.uint16))
     else:
-        print("GUI_INFO: saving 3D masks to tiff")
+        parent.logger.info("saving 3D masks to tiff")
         imsave(base + "_cp_masks.tif", parent.cellpix)
 
 
@@ -577,9 +494,16 @@ def _save_flows(parent):
     """ save flows and cellprob to tiff """
     filename = parent.filename
     base = os.path.splitext(filename)[0]
+    parent.logger.info("saving flows and cellprob to tiff")
     if len(parent.flows) > 0:
-        imsave(base + "_cp_flows.tif", parent.flows[4][:-1])
-        imsave(base + "_cp_cellprob.tif", parent.flows[4][-1])
+        imsave(base + "_cp_cellprob.tif", parent.flows[1])
+        for i in range(3):
+            imsave(base + f"_cp_flows_{i}.tif", parent.flows[0][..., i])
+        if len(parent.flows) > 2:
+            imsave(base + "_cp_flows.tif", parent.flows[2])
+        parent.logger.info("saved flows and cellprob")
+    else:
+        print("ERROR: no flows or cellprob found")
 
 
 def _save_rois(parent):
@@ -619,7 +543,11 @@ def _save_sets(parent):
     """
     filename = parent.filename
     base = os.path.splitext(filename)[0]
-    flow_threshold, cellprob_threshold = parent.get_thresholds()
+    flow_threshold = parent.segmentation_settings.flow_threshold
+    cellprob_threshold = parent.segmentation_settings.cellprob_threshold
+
+    # use ints instead of strings for backwards compatibility with old _seg.npy files
+    color_int = list(parent.RGBDropDown.name_map.keys()).index(parent.color)
     if parent.NZ > 1:
         dat = {
             "outlines":
@@ -628,7 +556,7 @@ def _save_sets(parent):
                 parent.cellcolors[1:],
             "masks":
                 parent.cellpix,
-            "current_channel": (parent.color - 2) % 5,
+            "current_channel": color_int,
             "filename":
                 parent.filename,
             "flows":
@@ -649,11 +577,10 @@ def _save_sets(parent):
             "ratio":
                 parent.ratio,
             "diameter":
-                parent.diameter
+                parent.segmentation_settings.diameter
         }
         if parent.restore is not None:
             dat["img_restore"] = parent.stack_filtered
-        np.save(base + "_seg.npy", dat)
     else:
         dat = {
             "outlines":
@@ -664,10 +591,6 @@ def _save_sets(parent):
             "masks":
                 parent.cellpix.squeeze() if parent.restore is None or
                 not "upsample" in parent.restore else parent.cellpix_resize.squeeze(),
-            "chan_choose": [
-                parent.ChannelChoose[0].currentIndex(),
-                parent.ChannelChoose[1].currentIndex()
-            ],
             "filename":
                 parent.filename,
             "flows":
@@ -690,11 +613,13 @@ def _save_sets(parent):
             "ratio":
                 parent.ratio,
             "diameter":
-                parent.diameter
+                parent.segmentation_settings.diameter
         }
         if parent.restore is not None:
             dat["img_restore"] = parent.stack_filtered
+    try:
         np.save(base + "_seg.npy", dat)
+        parent.logger.info("%d ROIs saved to %s" % (parent.ncells.get(), base + "_seg.npy"))
+    except Exception as e:
+        print(f"ERROR: {e}")
     del dat
-    #print(parent.point_sets)
-    print("GUI_INFO: %d ROIs saved to %s" % (parent.ncells, base + "_seg.npy"))

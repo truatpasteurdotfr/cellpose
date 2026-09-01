@@ -24,16 +24,21 @@ incorrect. If drag-and-drop works (you can see a tiff with multiple planes),
 then the GUI will automatically run 3D segmentation and display it in the GUI. Watch 
 the command line for progress. It is recommended to use a GPU to speed up processing.
 
-In the CLI/notebook, you can specify the ``channel_axis`` and/or ``z_axis``
-parameters to specify the axis (0-based) of the image which corresponds to the image channels and to the z axis. 
-For example an image with 2 channels of shape (1024,1024,2,105,1) can be 
-specified with ``channel_axis=2`` and ``z_axis=3``. If ``channel_axis=None`` 
-cellpose will try to automatically determine the channel axis by choosing 
-the dimension with the minimal size after squeezing. If ``z_axis=None`` 
-cellpose will automatically select the first non-channel axis of the image 
-to be the Z axis. These parameters can be specified using the command line 
-with ``--channel_axis`` or ``--z_axis`` or as inputs to ``model.eval`` for 
-the ``Cellpose`` or ``CellposeModel`` model.
+In the CLI/notebook, you need to specify the ``z_axis`` and the ``channel_axis``
+parameters to specify the axis (0-based) of the image which corresponds to the image channels and to the z axis.
+For example an image with 2 channels of shape (1024,1024,2,105,1) can be
+specified with ``channel_axis=2`` and ``z_axis=3``. These parameters can be specified using the command line
+with ``--channel_axis`` or ``--z_axis`` or as inputs to ``model.eval`` for
+the ``CellposeModel`` model.
+
+As a convenience, :func:`cellpose.io.imread_3D` will attempt to load a 3D image and
+automatically guess the axes. For grayscale images (3D array), axis 0 is assumed
+to be the Z axis (e.g., Z x Y x X). For multichannel images (4D array), the
+channel axis is assumed to be the smallest dimension, and the Z axis is assumed to
+be the first remaining axis after the channel axis is identified (e.g., for a
+Z x C x Y x X image, channel axis = 1 and z axis = 0). If your image does not
+follow these conventions, use ``cellpose.io.imread`` and specify ``z_axis`` and
+``channel_axis`` manually.
 
 Volumetric stacks do not always have the same sampling in XY as they do in Z. 
 Therefore you can set an ``anisotropy`` parameter in CLI/notebook to allow for differences in 
@@ -49,16 +54,23 @@ Specify this segmentation format in the notebook with ``do_3D=True`` or in the C
 (with the CLI it will segment all tiffs in the folder as 3D tiffs if possible).
 
 If you see many cells that are fragmented, you can smooth the flows before the dynamics 
-are run in 3D using the ``dP_smooth`` parameter, which specifies the standard deviation of 
+are run in 3D using the ``flow3D_smooth`` parameter, which specifies the standard deviation of 
 a Gaussian for smoothing the flows. The default is 0.0, which means no smoothing. Alternatively/additionally,
 you may want to train a model on 2D slices from your 3D data to improve the segmentation (see below).
+*If there are ring-like artifacts in your masks*, increasing ``flow3D_smooth`` can help remove them. 
+You can specify the ZYX flow smoothing independently for each axis by passing a list of values to the ``flow3D_smooth`` 
+argument. For example: ``flow3D_smooth = [2, 0, 0]`` 
 
-The network rescales images using the user diameter and the model ``diam_mean`` (usually 30),
-so for example if you input a diameter of 90 and the model was trained with a diameter of 30, 
-then the image will be downsampled by a factor of 3 for computing the flows. If ``resample`` 
-is enabled, then the image will then be upsampled for finding the masks. This will take 
-additional CPU and GPU memory, so for 3D you may want to set ``resample=False`` or in the CLI ``--no_resample`` 
-(more details here :ref:`resample`).
+The network can rescale images using the user diameter and the model ``diam_mean`` (30),
+so for example if you input a diameter of 90, 
+then the image will be downsampled by a factor of 3, which will increase run speed.
+However, the new Cellpose-SAM model is invariant to diameter, so this is optional.
+
+3D segmentation ignores the ``flow_threshold`` because we did not find that
+it helped to filter out false positives in our test 3D cell volume. Instead, 
+we found that setting ``min_size`` is a good way to remove false positives. 
+Note that ``min_size`` applies per slice when ``stitch_threshold`` is used, 
+you will need to remove masks afterwards if you have a 3D minimum size to apply.
 
 There may be additional differences in YZ and XZ slices 
 that make them unable to be used for 3D segmentation. 
@@ -68,13 +80,8 @@ In those instances, you may want to turn off
 3D segmentation (``do_3D=False``) and run instead with ``stitch_threshold>0``. 
 Cellpose will create ROIs in 2D on each XY slice and then stitch them across 
 slices if the IoU between the mask on the current slice and the next slice is 
-greater than or equal to the ``stitch_threshold``. Alternatively, you can train a separate model for 
-YX slices vs ZY and ZX slices, and then specify the separate model for ZY/ZX slices 
-using the ``pretrained_model_ortho`` option in ``CellposeModel``.
+greater than or equal to the ``stitch_threshold``.
 
-3D segmentation ignores the ``flow_threshold`` because we did not find that
-it helped to filter out false positives in our test 3D cell volume. Instead, 
-we found that setting ``min_size`` is a good way to remove false positives.
 
 Training for 3D segmentation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -84,10 +91,7 @@ If you have anisotropic volumes, then set the ``--anisotropy`` flag to the ratio
 e.g. set ``--anisotropy 5`` for pixel size of 1.0 um in YX and 5.0 um in Z. Now you can 
 drag-and-drop an image from the folder into the GUI and start to re-train a model 
 by labeling your crops and using the ``Train`` option in the GUI (see the 
-Cellpose2 tutorial for more advice). If the model with all crops 
-isn't working well, you can alternatively separate the crops
-into two folders (YX and ZY/ZX) and train separate networks, and use 
-``pretrained_model_ortho`` when declaring your model.
+Cellpose2 tutorial for more advice). 
 
 See the help message for more information:
 
@@ -122,6 +126,8 @@ See the help message for more information:
     --all_channels        use all channels in image if using own model and images with special channels
     --anisotropy ANISOTROPY
                             anisotropy of volume in 3D
+    --seg_masks           use 3D masks saved in a _seg.npy file to create 2D _seg.npy files
+
 
     algorithm arguments:
     --sharpen_radius SHARPEN_RADIUS

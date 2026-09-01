@@ -1,8 +1,7 @@
 """
-Copyright © 2023 Howard Hughes Medical Institute, Authored by Carsen Stringer and Marius Pachitariu.
+Copyright © 2025 Howard Hughes Medical Institute, Authored by Carsen Stringer , Michael Rariden and Marius Pachitariu.
 """
-
-import os, datetime, gc, warnings, glob, shutil
+import os, warnings, glob, shutil
 from natsort import natsorted
 import numpy as np
 import cv2
@@ -11,7 +10,7 @@ import logging, pathlib, sys
 from tqdm import tqdm
 from pathlib import Path
 import re
-from . import version_str
+from .version import version_str
 from roifile import ImagejRoi, roiwrite
 
 try:
@@ -47,22 +46,67 @@ except:
 
 io_logger = logging.getLogger(__name__)
 
-def logger_setup(cp_path=".cellpose", logfile_name="run.log"):
+def logger_setup(cp_path=".cellpose", logfile_name="run.log", stdout_file_replacement=None):
+    """Set up logging to a file and stdout (or a file replacement).
+
+    Creates the log directory if it doesn't exist, removes any existing log
+    file, and configures the root logger to write INFO-level and above messages
+    to both a log file and stdout (or a replacement file).
+
+    Parameters
+    ----------
+    cp_path : str, optional
+        Directory name under the user's home directory for log output.
+        Default is ".cellpose".
+    logfile_name : str, optional
+        Name of the log file created inside cp_path. Default is "run.log".
+    stdout_file_replacement : str or None, optional
+        If provided, log output is written to this file path instead of stdout.
+
+    Returns
+    -------
+    logger : logging.Logger
+        Configured logger for this module. Only INFO and above messages are
+        emitted by default. To enable debug output, call
+        ``logger.setLevel(logging.DEBUG)`` on the returned logger.
+
+    Notes
+    -----
+    The log file is deleted and recreated on each call.
+    """
     cp_dir = pathlib.Path.home().joinpath(cp_path)
     cp_dir.mkdir(exist_ok=True)
     log_file = cp_dir.joinpath(logfile_name)
     try:
         log_file.unlink()
-    except:
-        print("creating new log file")
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[logging.FileHandler(log_file),
-                  logging.StreamHandler(sys.stdout)])
-    logger = logging.getLogger(__name__)
+    except FileNotFoundError:
+        print('creating new log file')
+    logfile_fh = logging.FileHandler(log_file)
+    if stdout_file_replacement is not None:
+        stdout_fh = logging.FileHandler(stdout_file_replacement)
+    else:
+        stdout_fh = logging.StreamHandler(sys.stdout)
+
+    formatter = logging.Formatter("%(asctime)s [%(module)s %(levelname)s] %(message)s")
+    debug_formatter = logging.Formatter("%(asctime)s %(levelname)s [%(filename)s:%(lineno)d - %(funcName)20s()] %(message)s")
+    logger = logging.getLogger('cellpose')
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+
+    logfile_fh.setFormatter(debug_formatter)
+    logfile_fh.setLevel(logging.DEBUG)
+    logger.addHandler(logfile_fh)
+
+    stdout_fh.setFormatter(formatter)
+    stdout_fh.setLevel(logging.INFO)
+    logger.addHandler(stdout_fh)
+
+    logger.propagate = False
+
+    print(f"[GUI INFO] : WRITING LOG OUTPUT TO {log_file}")
+    print(version_str)
     logger.info(f"WRITING LOG OUTPUT TO {log_file}")
     logger.info(version_str)
-    #logger.handlers[1].stream = sys.stdout
 
     return logger, log_file
 
@@ -184,6 +228,28 @@ def imread(filename):
         if not ND2:
             io_logger.critical("ERROR: need to 'pip install nd2' to load in .nd2 file")
             return None
+        else:
+            with nd2.ND2File(filename) as nd2_file:
+                img = nd2_file.asarray()
+                sizes = nd2_file.sizes
+
+            kept_axes = [nd2.AXIS.Y, nd2.AXIS.X, nd2.AXIS.CHANNEL, nd2.AXIS.Z]
+            # For multi-dimensional data (T, P, etc.), take first frame/position
+            # Work backwards through axes to avoid index shifting
+            for i, (ax_name, size) in reversed(list(enumerate(sizes.items()))):
+                # Keep Y, X, C, Z; remove or reduce everything else
+                if ax_name not in kept_axes:
+                    if size > 1:
+                        io_logger.warning(
+                            f"ND2 file has {size} {ax_name} - using first only"
+                        )
+                    # Take first element (works for both size=1 and size>1)
+                    img = np.take(img, 0, axis=i)
+
+            # Result should now be YX, CYX, ZYX, or CZYX depending on original axes
+            # nd2 preserves axis order from sizes dict (usually C, Z, Y, X)
+            return img
+
     elif ext == ".nrrd":
         if not NRRD:
             io_logger.critical(
@@ -213,11 +279,78 @@ def imread(filename):
             return None
 
 
+def imread_2D(img_file):
+    """
+    Read in a 2D image file and convert it to a 3-channel image. Attempts to do this for multi-channel and grayscale images.
+    If the image has more than 3 channels, only the first 3 channels are kept.
+    
+    Args:
+        img_file (str): The path to the image file.
+
+    Returns:
+        img_out (numpy.ndarray): The 3-channel image data as a NumPy array.
+    """
+    img = imread(img_file)
+    if img is None:
+        raise ValueError(f"could not read image file {img_file}")
+    return transforms.convert_image(img, do_3D=False)
+
+
+def imread_3D(img_file):
+    """
+    Read in a 3D image file and convert it to have a channel axis last automatically. Attempts to do this for multi-channel and grayscale images.
+
+    For grayscale images (3D array), axis 0 is assumed to be the Z axis (e.g., Z x Y x X).
+    For multichannel images (4D array), the channel axis is assumed to be the smallest dimension,
+    and the Z axis is assumed to be the first remaining axis after the channel axis is removed.
+
+    Use ``cellpose.io.imread()`` to load the full image without automatic axis selection,
+    then specify ``z_axis`` and ``channel_axis`` manually when calling ``model.eval``.
+
+    Args:
+        img_file (str): The path to the image file.
+
+    Returns:
+        img_out (numpy.ndarray): The image data as a NumPy array with channels last, or None if loading fails.
+    """
+    img = imread(img_file)
+    if img is None:
+        raise ValueError(f"could not read image file {img_file}")
+
+    dimension_lengths = list(img.shape)
+
+    # grayscale images:
+    if img.ndim == 3:
+        channel_axis = None
+        # guess at z axis:
+        z_axis = 0
+
+    elif img.ndim == 4:
+        # guess at channel axis:
+        channel_axis = np.argmin(dimension_lengths)
+        dimensions = list(range(img.ndim))
+        dimensions.pop(channel_axis)
+        # guess at z axis as the first remaining dimension: 
+        z_axis = dimensions[0]
+
+    else: 
+        raise ValueError(f'image shape error, 3D image must 3 or 4 dimensional. Number of dimensions: {img.ndim}')
+    
+    try:
+        return transforms.convert_image(img, channel_axis=channel_axis, z_axis=z_axis, do_3D=True)
+    except Exception as e:
+        io_logger.critical("ERROR: could not read file, %s" % e)
+        io_logger.critical("ERROR: Guessed z_axis: %s, channel_axis: %s" % (z_axis, channel_axis))
+        return None
+
 def remove_model(filename, delete=False):
     """ remove model from .cellpose custom model list """
     filename = os.path.split(filename)[-1]
     from . import models
     model_strings = models.get_user_models()
+    if filename not in model_strings:
+        raise ValueError(f'filename not found: {filename}')
+    model_strings.remove(filename)
     if len(model_strings) > 0:
         with open(models.MODEL_LIST_PATH, "w") as textfile:
             for fname in model_strings:
@@ -226,10 +359,10 @@ def remove_model(filename, delete=False):
         # write empty file
         textfile = open(models.MODEL_LIST_PATH, "w")
         textfile.close()
-    print(f"{filename} removed from custom model list")
+    io_logger.info(f"{filename} removed from custom model list")
     if delete:
-        os.remove(os.fspath(models.MODEL_DIR.joinpath(fname)))
-        print("model deleted")
+        os.remove(os.fspath(models.MODEL_DIR.joinpath(filename)))
+        io_logger.info(f"{filename} model deleted from disk")
 
 
 def add_model(filename):
@@ -259,7 +392,7 @@ def imsave(filename, arr):
     """
     ext = os.path.splitext(filename)[-1].lower()
     if ext == ".tif" or ext == ".tiff":
-        tifffile.imwrite(filename, arr)
+        tifffile.imwrite(filename, data=arr, compression="zlib")
     else:
         if len(arr.shape) > 2:
             arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
@@ -284,7 +417,8 @@ def get_image_files(folder, mask_filter, imf=None, look_one_level_down=False):
         ValueError: If no images are found in the specified folder with the supported file extensions.
         ValueError: If no images are found in the specified folder without the mask or flow file endings.
     """
-    mask_filters = ["_cp_masks", "_cp_output", "_flows", "_masks", mask_filter]
+    mask_filters = ["_cp_output", "_flows", "_flows_0", "_flows_1",
+                    "_flows_2", "_cellprob", "_masks", mask_filter]
     image_names = []
     if imf is None:
         imf = ""
@@ -332,7 +466,7 @@ def get_image_files(folder, mask_filter, imf=None, look_one_level_down=False):
 
     if len(image_names) == 0:
         raise ValueError(
-            "ERROR: no images in --dir folder without _masks or _flows ending")
+            "ERROR: no images in --dir folder without _masks or _flows or _cellprob ending")
 
     return image_names
 
@@ -377,7 +511,7 @@ def get_label_files(image_names, mask_filter, imf=None):
         label_names = [label_names[n] + mask_filter + ".tiff" for n in range(nimg)]
     elif os.path.exists(label_names[0] + mask_filter + ".png"):
         label_names = [label_names[n] + mask_filter + ".png" for n in range(nimg)]
-    # todo, allow _seg.npy
+    # TODO, allow _seg.npy
     #elif os.path.exists(label_names[0] + "_seg.npy"):
     #    io_logger.info("labels found as _seg.npy files, converting to tif")
     else:
@@ -420,7 +554,7 @@ def load_images_labels(tdir, mask_filter="_masks", image_filter=None,
     labels = []
     k = 0
     for n in range(nimg):
-        if (os.path.isfile(label_names[n]) or 
+        if (os.path.isfile(label_names[n]) or
             (flow_names is not None and os.path.isfile(flow_names[0]))):
             image = imread(image_names[n])
             if label_names is not None:
@@ -450,12 +584,8 @@ def load_train_test_data(train_dir, test_dir=None, image_filter=None,
         look_one_level_down (bool, optional): Whether to look for data in subdirectories of train_dir and test_dir. Defaults to False.
 
     Returns:
-        images (list): A list of training images.
-        labels (list): A list of labels corresponding to the training images.
-        image_names (list): A list of names of the training images.
-        test_images (list, optional): A list of testing images. None if test_dir is not provided.
-        test_labels (list, optional): A list of labels corresponding to the testing images. None if test_dir is not provided.
-        test_image_names (list, optional): A list of names of the testing images. None if test_dir is not provided.
+        images, labels, image_names, test_images, test_labels, test_image_names
+
     """
     images, labels, image_names = load_images_labels(train_dir, mask_filter,
                                                      image_filter, look_one_level_down)
@@ -468,20 +598,21 @@ def load_train_test_data(train_dir, test_dir=None, image_filter=None,
     return images, labels, image_names, test_images, test_labels, test_image_names
 
 
-def masks_flows_to_seg(images, masks, flows, file_names, diams=30., channels=None,
+def masks_flows_to_seg(images, masks, flows, file_names, 
+                       channels=None,
                        imgs_restore=None, restore_type=None, ratio=1.):
     """Save output of model eval to be loaded in GUI.
 
     Can be list output (run on multiple images) or single output (run on single image).
 
     Saved to file_names[k]+"_seg.npy".
-    
+
     Args:
         images (list): Images input into cellpose.
         masks (list): Masks output from Cellpose.eval, where 0=NO masks; 1,2,...=mask labels.
         flows (list): Flows output from Cellpose.eval.
         file_names (list, str): Names of files of images.
-        diams (float array): Diameters used to run Cellpose. Defaults to 30.
+        diams (float array): Diameters used to run Cellpose. Defaults to 30. TODO: remove this
         channels (list, int, optional): Channels used to run Cellpose. Defaults to None.
 
     Returns:
@@ -492,19 +623,22 @@ def masks_flows_to_seg(images, masks, flows, file_names, diams=30., channels=Non
         channels = [0, 0]
 
     if isinstance(masks, list):
-        if not isinstance(diams, (list, np.ndarray)):
-            diams = diams * np.ones(len(masks), np.float32)
         if imgs_restore is None:
             imgs_restore = [None] * len(masks)
         if isinstance(file_names, str):
             file_names = [file_names] * len(masks)
-        for k, [image, mask, flow, diam, file_name, img_restore
-               ] in enumerate(zip(images, masks, flows, diams, file_names,
+        for k, [image, mask, flow, 
+                # diam, 
+                file_name, img_restore
+               ] in enumerate(zip(images, masks, flows, 
+                                #   diams, 
+                                  file_names,
                                   imgs_restore)):
             channels_img = channels
             if channels_img is not None and len(channels) > 2:
                 channels_img = channels[k]
-            masks_flows_to_seg(image, mask, flow, file_name, diams=diam,
+            masks_flows_to_seg(image, mask, flow, file_name, 
+                            #    diams=diam,
                                channels=channels_img, imgs_restore=img_restore,
                                restore_type=restore_type, ratio=ratio)
         return
@@ -557,7 +691,7 @@ def masks_flows_to_seg(images, masks, flows, file_names, diams=30., channels=Non
         "flows":
             flowi,
         "diameter":
-            diams
+            np.nan
     }
     if restore_type is not None and imgs_restore is not None:
         dat["restore"] = restore_type
@@ -575,34 +709,42 @@ def save_to_png(images, masks, flows, file_names):
     save_masks(images, masks, flows, file_names, png=True)
 
 
-def save_rois(masks, file_name, multiprocessing=None):
+def save_rois(masks, file_name, multiprocessing=None, prefix='', pad=False):
     """ save masks to .roi files in .zip archive for ImageJ/Fiji
+    When opened in ImageJ, the ROIs will be named [prefix][0000]n where n is 1,2,... corresponding to the masks label
 
     Args:
         masks (np.ndarray): masks output from Cellpose.eval, where 0=NO masks; 1,2,...=mask labels
         file_name (str): name to save the .zip file to
-    
+        multiprocessing (bool, optional): Flag to enable multiprocessing. Defaults to None (disabled).
+        prefix (str, optional): prefix to add at the beginning of the ROI labels in ImageJ. Defaults to no prefix
+        pad (bool, optional): Whether to pad the numerical part of the label with zeros so that all labels have the same length
+
     Returns:
         None
     """
+    if masks.max() == 0:
+        io_logger.warning("no masks found, will not save ImageJ ROIs to .zip archive")
+        return
+
     outlines = utils.outlines_list(masks, multiprocessing=multiprocessing)
-    nonempty_outlines = [outline for outline in outlines if len(outline)!=0]
-    if len(outlines)!=len(nonempty_outlines):
-        print(f"empty outlines found, saving {len(nonempty_outlines)} ImageJ ROIs to .zip archive.")
-    rois = [ImagejRoi.frompoints(outline) for outline in nonempty_outlines]
+    
+    n_digits = int(np.floor(np.log10(masks.max()))+1) if pad else 0
+    fmt = f'{{prefix}}{{id:0{n_digits}d}}'
+    rois = []
+    for n,outline in zip(np.unique(masks)[1:], outlines):
+        if len(outline) > 0:
+            rois.append(ImagejRoi.frompoints(outline, name=fmt.format(prefix=prefix, id=n)))
+
+    if len(outlines) != len(rois):
+        print(f"empty outlines found, saving {len(rois)} ImageJ ROIs to .zip archive.")
+
     file_name = os.path.splitext(file_name)[0] + '_rois.zip'
-
-
-    # Delete file if it exists; the roifile lib appends to existing zip files.
-    # If the user removed a mask it will still be in the zip file
-    if os.path.exists(file_name):
-        os.remove(file_name)
-
-    roiwrite(file_name, rois)
+    roiwrite(file_name, rois, mode='w')
 
 
 def save_masks(images, masks, flows, file_names, png=True, tif=False, channels=[0, 0],
-               suffix="", save_flows=False, save_outlines=False, dir_above=False,
+               suffix="_cp_masks", save_flows=False, save_outlines=False, dir_above=False,
                in_folders=False, savedir=None, save_txt=False, save_mpl=False):
     """ Save masks + nicely plotted segmentation image to png and/or tiff.
 
@@ -624,16 +766,16 @@ def save_masks(images, masks, flows, file_names, png=True, tif=False, channels=[
         png (bool, optional): Save masks to PNG. Defaults to True.
         tif (bool, optional): Save masks to TIF. Defaults to False.
         channels (list, int, optional): Channels used to run Cellpose. Defaults to [0,0].
-        suffix (str, optional): Add name to saved masks. Defaults to "".
+        suffix (str, optional): Add name to saved masks. Defaults to "_cp_masks".
         save_flows (bool, optional): Save flows output from Cellpose.eval. Defaults to False.
         save_outlines (bool, optional): Save outlines of masks. Defaults to False.
         dir_above (bool, optional): Save masks/flows in directory above. Defaults to False.
         in_folders (bool, optional): Save masks/flows in separate folders. Defaults to False.
-        savedir (str, optional): Absolute path where images will be saved. If None, saves to image directory. Defaults to None.
+        savedir (str, optional): Absolute or relative path where images will be saved. If None, saves to image directory. Defaults to None.
         save_txt (bool, optional): Save masks as list of outlines for ImageJ. Defaults to False.
         save_mpl (bool, optional): If True, saves a matplotlib figure of the original image/segmentation/flows. Does not work for 3D.
                 This takes a long time for large images. Defaults to False.
-    
+
     Returns:
         None
     """
@@ -661,11 +803,11 @@ def save_masks(images, masks, flows, file_names, png=True, tif=False, channels=[
 
     if savedir is None:
         if dir_above:
-            savedir = Path(file_names).parent.parent.absolute(
-            )  #go up a level to save in its own folder
+            savedir = Path(file_names).parent.parent#go up a level to save in its own folder
         else:
-            savedir = Path(file_names).parent.absolute()
+            savedir = Path(file_names).parent
 
+    savedir = Path(savedir).resolve()
     check_dir(savedir)
 
     basename = os.path.splitext(os.path.basename(file_names))[0]
@@ -703,8 +845,7 @@ def save_masks(images, masks, flows, file_names, png=True, tif=False, channels=[
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for ext in exts:
-
-            imsave(os.path.join(maskdir, basename + "_cp_masks" + suffix + ext), masks)
+            imsave(os.path.join(maskdir, basename + suffix + ext), masks)
 
     if save_mpl and png and MATPLOTLIB and not min(images.shape) > 3:
         # Make and save original/segmentation/flows image
@@ -749,6 +890,9 @@ def save_masks(images, masks, flows, file_names, png=True, tif=False, channels=[
     if masks.ndim < 3 and save_flows:
         check_dir(flowdir)
         imsave(os.path.join(flowdir, basename + "_flows" + suffix + ".tif"),
-               (flows[0] * (2**16 - 1)).astype(np.uint16))
+               flows[0]
+              )
         #save full flow data
-        imsave(os.path.join(flowdir, basename + '_dP' + suffix + '.tif'), flows[1]) 
+        imsave(os.path.join(flowdir, basename + '_dP' + suffix + '.tif'), flows[1])
+        # save cellprob
+        imsave(os.path.join(flowdir, basename + '_cellprob' + suffix + '.tif'), flows[2])

@@ -51,10 +51,9 @@ import numpy as np
 from cellpose.io import imread
 from cellpose.utils import download_url_to_file
 from cellpose.transforms import pad_image_ND, normalize_img, convert_image
-from cellpose.resnet_torch import CPnetBioImageIO
+from cellpose.vit import CPnetBioImageIO
 
 from bioimageio.spec.model.v0_5 import (
-    ARBITRARY_SIZE,
     ArchitectureFromFileDescr,
     Author,
     AxisId,
@@ -80,6 +79,12 @@ from bioimageio.spec.model.v0_5 import (
     Version,
     WeightsDescr,
 )
+# Define ARBITRARY_SIZE if it is not available in the module
+try:
+    from bioimageio.spec.model.v0_5 import ARBITRARY_SIZE
+except ImportError:
+    ARBITRARY_SIZE = ParameterizedSize(min=1, step=1)
+
 from bioimageio.spec.common import HttpUrl
 from bioimageio.spec import save_bioimageio_package
 from bioimageio.core import test_model
@@ -119,12 +124,7 @@ def download_and_normalize_image(path_dir_temp, channels=DEFAULT_CHANNELS):
 
 def load_bioimageio_cpnet_model(path_model_weight, nchan=2):
     cpnet_kwargs = {
-        "nbase": [nchan, 32, 64, 128, 256],
         "nout": 3,
-        "sz": 3,
-        "mkldnn": False,
-        "conv_3D": False,
-        "max_pool": True,
     }
     cpnet_biio = CPnetBioImageIO(**cpnet_kwargs)
     state_dict_cuda = torch.load(path_model_weight, map_location=torch.device("cpu"), weights_only=True)
