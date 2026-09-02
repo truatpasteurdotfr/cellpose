@@ -1,5 +1,5 @@
 #FROM ghcr.io/prefix-dev/pixi AS build
-FROM ghcr.io/prefix-dev/pixi:trixie
+FROM ghcr.io/prefix-dev/pixi:trixie-slim
 RUN pixi --version
 
 RUN cd /opt && pixi init py312-cellpose && cd py312-cellpose && \
