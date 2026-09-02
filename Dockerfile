@@ -19,7 +19,7 @@ ENTRYPOINT ["/bin/bash", "/shell-hook.sh"]
 FROM debian:13 AS production
 RUN apt-get update && \
 	DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade && \
-	DEBIAN_FRONTEND=noninteractive apt-get -y install
+	DEBIAN_FRONTEND=noninteractive apt-get -y install \
 		curl  \
 		libdbus-1-3 \
 		libegl-mesa0 \
