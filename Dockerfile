@@ -1,4 +1,4 @@
-FROM ghcr.io/prefix-dev/pixi AS BUILD
+FROM ghcr.io/prefix-dev/pixi AS build
 RUN pixi --version
 
 RUN cd /opt && pixi init py312-cellpose && cd py312-cellpose && \
