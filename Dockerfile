@@ -17,7 +17,7 @@ RUN cd /opt/py312-cellpose && pixi shell-hook  > /shell-hook.sh && echo 'exec "$
 ENTRYPOINT ["/bin/bash", "/shell-hook.sh"]
 
 FROM debian:13 AS production
-	apt-get update && \
+RUN apt-get update && \
 	DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade && \
 	DEBIAN_FRONTEND=noninteractive apt-get -y install
 		curl  \
