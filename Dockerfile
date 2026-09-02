@@ -1,12 +1,4 @@
 FROM ghcr.io/prefix-dev/pixi AS BUILD
-
-
-	apt-get update && \
-	DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade && \
-	DEBIAN_FRONTEND=noninteractive apt-get -y install curl && \
-	DEBIAN_FRONTEND=noninteractive apt-get -y autoremove && \
-	DEBIAN_FRONTEND=noninteractive apt-get clean all
-
 RUN pixi --version
 
 RUN cd /opt && pixi init py312-cellpose && cd py312-cellpose && \
