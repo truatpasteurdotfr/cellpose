@@ -9,7 +9,7 @@ RUN cd /opt && pixi init py312-cellpose && cd py312-cellpose && \
 RUN cd /opt/py312-cellpose && pixi shell-hook  > /shell-hook.sh && echo 'exec "$@"' >> /shell-hook.sh
 ENTRYPOINT ["/bin/bash", "/shell-hook.sh"]
 
-#FROM debian:13 AS production
+FROM debian:13 AS production
 RUN apt-get update && \
 	DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade && \
 	DEBIAN_FRONTEND=noninteractive apt-get -y install \
@@ -36,7 +36,7 @@ RUN apt-get update && \
 	&& \
 	DEBIAN_FRONTEND=noninteractive apt-get -y autoremove && \
 	DEBIAN_FRONTEND=noninteractive apt-get clean all
-#COPY --from=build /opt/py312-cellpose /opt/py312-cellpose
-#COPY --from=build /shell-hook.sh /shell-hook.sh
+COPY --from=build /opt/py312-cellpose /opt/py312-cellpose
+COPY --from=build /shell-hook.sh /shell-hook.sh
 
-#ENTRYPOINT ["/bin/bash", "/shell-hook.sh"]
+ENTRYPOINT ["/bin/bash", "/shell-hook.sh"]
